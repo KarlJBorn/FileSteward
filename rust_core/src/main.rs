@@ -1,28 +1,26 @@
 use serde::Serialize;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
-struct ChildEntry {
-    name: String,
+struct ManifestEntry {
+    relative_path: String,
     entry_type: String,
+    size_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
-struct FolderInspectionResult {
+struct ManifestResult {
     selected_folder: String,
     exists: bool,
     is_directory: bool,
-    direct_child_entries: usize,
-    direct_directories: usize,
-    direct_files: usize,
-    direct_other_entries: usize,
-    children: Vec<ChildEntry>,
+    total_directories: usize,
+    total_files: usize,
+    entries: Vec<ManifestEntry>,
 }
 
 fn main() {
-    // args[0] is the executable name. We expect the folder path in args[1].
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -31,67 +29,41 @@ fn main() {
     }
 
     let folder_path = &args[1];
-    let path = Path::new(folder_path);
+    let root_path = Path::new(folder_path);
 
-    let exists = path.exists();
-    let is_directory = path.is_dir();
+    let exists = root_path.exists();
+    let is_directory = root_path.is_dir();
 
-    let mut children: Vec<ChildEntry> = Vec::new();
-    let mut direct_directories: usize = 0;
-    let mut direct_files: usize = 0;
-    let mut direct_other_entries: usize = 0;
+    let mut entries: Vec<ManifestEntry> = Vec::new();
+    let mut total_directories: usize = 0;
+    let mut total_files: usize = 0;
 
     if exists && is_directory {
-        match fs::read_dir(path) {
-            Ok(entries) => {
-                for entry_result in entries {
-                    match entry_result {
-                        Ok(entry) => {
-                            let file_name = entry.file_name().to_string_lossy().to_string();
-                            let entry_path = entry.path();
-
-                            let entry_type = if entry_path.is_dir() {
-                                direct_directories += 1;
-                                "directory".to_string()
-                            } else if entry_path.is_file() {
-                                direct_files += 1;
-                                "file".to_string()
-                            } else {
-                                direct_other_entries += 1;
-                                "other".to_string()
-                            };
-
-                            children.push(ChildEntry {
-                                name: file_name,
-                                entry_type,
-                            });
-                        }
-                        Err(err) => {
-                            eprintln!("Failed to read a directory entry: {}", err);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-            Err(err) => {
-                eprintln!("Failed to read directory: {}", err);
-                std::process::exit(1);
-            }
+        if let Err(err) = walk_directory(
+            root_path,
+            root_path,
+            &mut entries,
+            &mut total_directories,
+            &mut total_files,
+        ) {
+            eprintln!("Failed to build manifest: {}", err);
+            std::process::exit(1);
         }
     }
 
-    // Keep output stable and predictable.
-    children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.sort_by(|a, b| {
+        a.relative_path
+            .to_lowercase()
+            .cmp(&b.relative_path.to_lowercase())
+    });
 
-    let result = FolderInspectionResult {
+    let result = ManifestResult {
         selected_folder: folder_path.to_string(),
         exists,
         is_directory,
-        direct_child_entries: children.len(),
-        direct_directories,
-        direct_files,
-        direct_other_entries,
-        children,
+        total_directories,
+        total_files,
+        entries,
     };
 
     match serde_json::to_string_pretty(&result) {
@@ -101,4 +73,60 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn walk_directory(
+    root_path: &Path,
+    current_path: &Path,
+    entries: &mut Vec<ManifestEntry>,
+    total_directories: &mut usize,
+    total_files: &mut usize,
+) -> Result<(), String> {
+    let read_dir = fs::read_dir(current_path).map_err(|err| err.to_string())?;
+
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|err| err.to_string())?;
+        let entry_path: PathBuf = entry.path();
+        let metadata = entry.metadata().map_err(|err| err.to_string())?;
+
+        let relative_path = entry_path
+            .strip_prefix(root_path)
+            .map_err(|err| err.to_string())?
+            .to_string_lossy()
+            .to_string();
+
+        if metadata.is_dir() {
+            *total_directories += 1;
+
+            entries.push(ManifestEntry {
+                relative_path,
+                entry_type: "directory".to_string(),
+                size_bytes: None,
+            });
+
+            walk_directory(
+                root_path,
+                &entry_path,
+                entries,
+                total_directories,
+                total_files,
+            )?;
+        } else if metadata.is_file() {
+            *total_files += 1;
+
+            entries.push(ManifestEntry {
+                relative_path,
+                entry_type: "file".to_string(),
+                size_bytes: Some(metadata.len()),
+            });
+        } else {
+            entries.push(ManifestEntry {
+                relative_path,
+                entry_type: "other".to_string(),
+                size_bytes: None,
+            });
+        }
+    }
+
+    Ok(())
 }

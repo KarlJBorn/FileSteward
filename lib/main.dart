@@ -21,58 +21,55 @@ class FileStewardApp extends StatelessWidget {
   }
 }
 
-class ChildEntry {
-  final String name;
+class ManifestEntry {
+  final String relativePath;
   final String entryType;
+  final int? sizeBytes;
 
-  ChildEntry({
-    required this.name,
+  ManifestEntry({
+    required this.relativePath,
     required this.entryType,
+    required this.sizeBytes,
   });
 
-  factory ChildEntry.fromJson(Map<String, dynamic> json) {
-    return ChildEntry(
-      name: json['name'] as String? ?? '',
+  factory ManifestEntry.fromJson(Map<String, dynamic> json) {
+    return ManifestEntry(
+      relativePath: json['relative_path'] as String? ?? '',
       entryType: json['entry_type'] as String? ?? 'other',
+      sizeBytes: json['size_bytes'] as int?,
     );
   }
 }
 
-class FolderInspectionResult {
+class ManifestResult {
   final String selectedFolder;
   final bool exists;
   final bool isDirectory;
-  final int directChildEntries;
-  final int directDirectories;
-  final int directFiles;
-  final int directOtherEntries;
-  final List<ChildEntry> children;
+  final int totalDirectories;
+  final int totalFiles;
+  final List<ManifestEntry> entries;
 
-  FolderInspectionResult({
+  ManifestResult({
     required this.selectedFolder,
     required this.exists,
     required this.isDirectory,
-    required this.directChildEntries,
-    required this.directDirectories,
-    required this.directFiles,
-    required this.directOtherEntries,
-    required this.children,
+    required this.totalDirectories,
+    required this.totalFiles,
+    required this.entries,
   });
 
-  factory FolderInspectionResult.fromJson(Map<String, dynamic> json) {
-    final List<dynamic> rawChildren = json['children'] as List<dynamic>? ?? [];
+  factory ManifestResult.fromJson(Map<String, dynamic> json) {
+    final List<dynamic> rawEntries = json['entries'] as List<dynamic>? ?? [];
 
-    return FolderInspectionResult(
+    return ManifestResult(
       selectedFolder: json['selected_folder'] as String? ?? '',
       exists: json['exists'] as bool? ?? false,
       isDirectory: json['is_directory'] as bool? ?? false,
-      directChildEntries: json['direct_child_entries'] as int? ?? 0,
-      directDirectories: json['direct_directories'] as int? ?? 0,
-      directFiles: json['direct_files'] as int? ?? 0,
-      directOtherEntries: json['direct_other_entries'] as int? ?? 0,
-      children: rawChildren
+      totalDirectories: json['total_directories'] as int? ?? 0,
+      totalFiles: json['total_files'] as int? ?? 0,
+      entries: rawEntries
           .map((dynamic item) =>
-              ChildEntry.fromJson(item as Map<String, dynamic>))
+              ManifestEntry.fromJson(item as Map<String, dynamic>))
           .toList(),
     );
   }
@@ -87,8 +84,8 @@ class FileStewardHomePage extends StatefulWidget {
 
 class _FileStewardHomePageState extends State<FileStewardHomePage> {
   String? _selectedFolderPath;
-  String _statusMessage = 'Choose a folder, then inspect it with Rust.';
-  FolderInspectionResult? _inspectionResult;
+  String _statusMessage = 'Choose a folder, then build a recursive manifest.';
+  ManifestResult? _manifestResult;
   bool _isRunning = false;
 
   String get _rustBinaryPath =>
@@ -107,21 +104,21 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 
       setState(() {
         _selectedFolderPath = directoryPath;
-        _inspectionResult = null;
+        _manifestResult = null;
         _statusMessage = 'Selected folder:\n$directoryPath';
       });
     } catch (e) {
       setState(() {
-        _inspectionResult = null;
+        _manifestResult = null;
         _statusMessage = 'Error choosing folder:\n\n$e';
       });
     }
   }
 
-  Future<void> _inspectFolder() async {
+  Future<void> _buildManifest() async {
     if (_selectedFolderPath == null || _selectedFolderPath!.isEmpty) {
       setState(() {
-        _inspectionResult = null;
+        _manifestResult = null;
         _statusMessage = 'Choose a folder first.';
       });
       return;
@@ -129,8 +126,8 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 
     setState(() {
       _isRunning = true;
-      _inspectionResult = null;
-      _statusMessage = 'Running Rust inspection...';
+      _manifestResult = null;
+      _statusMessage = 'Building recursive manifest...';
     });
 
     try {
@@ -152,16 +149,15 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       final Map<String, dynamic> decodedJson =
           jsonDecode(stdoutText) as Map<String, dynamic>;
 
-      final FolderInspectionResult parsedResult =
-          FolderInspectionResult.fromJson(decodedJson);
+      final ManifestResult parsedResult = ManifestResult.fromJson(decodedJson);
 
       setState(() {
-        _inspectionResult = parsedResult;
-        _statusMessage = 'Rust inspection completed.';
+        _manifestResult = parsedResult;
+        _statusMessage = 'Recursive manifest completed.';
       });
     } catch (e) {
       setState(() {
-        _inspectionResult = null;
+        _manifestResult = null;
         _statusMessage = 'Error running Rust:\n\n$e';
       });
     } finally {
@@ -182,7 +178,26 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     }
   }
 
-  Widget _buildSummaryCard(FolderInspectionResult result) {
+  String _formatSize(int? sizeBytes) {
+    if (sizeBytes == null) {
+      return '';
+    }
+
+    if (sizeBytes < 1024) {
+      return '$sizeBytes B';
+    }
+    if (sizeBytes < 1024 * 1024) {
+      return '${(sizeBytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (sizeBytes < 1024 * 1024 * 1024) {
+      return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(sizeBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
+  Widget _buildSummaryCard(ManifestResult result) {
+    final int totalEntries = result.entries.length;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -192,20 +207,16 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
           alignment: WrapAlignment.spaceEvenly,
           children: <Widget>[
             _SummaryItem(
-              label: 'Total',
-              value: result.directChildEntries.toString(),
+              label: 'Entries',
+              value: totalEntries.toString(),
             ),
             _SummaryItem(
               label: 'Folders',
-              value: result.directDirectories.toString(),
+              value: result.totalDirectories.toString(),
             ),
             _SummaryItem(
               label: 'Files',
-              value: result.directFiles.toString(),
-            ),
-            _SummaryItem(
-              label: 'Other',
-              value: result.directOtherEntries.toString(),
+              value: result.totalFiles.toString(),
             ),
           ],
         ),
@@ -214,41 +225,45 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   }
 
   List<Widget> _buildResultWidgets() {
-    if (_inspectionResult == null) {
+    if (_manifestResult == null) {
       return <Widget>[];
     }
 
     return <Widget>[
       Text(
-        'Exists: ${_inspectionResult!.exists ? "yes" : "no"}',
+        'Exists: ${_manifestResult!.exists ? "yes" : "no"}',
         style: const TextStyle(fontSize: 16),
       ),
       const SizedBox(height: 8),
       Text(
-        'Is directory: ${_inspectionResult!.isDirectory ? "yes" : "no"}',
+        'Is directory: ${_manifestResult!.isDirectory ? "yes" : "no"}',
         style: const TextStyle(fontSize: 16),
       ),
       const SizedBox(height: 16),
-      _buildSummaryCard(_inspectionResult!),
+      _buildSummaryCard(_manifestResult!),
       const SizedBox(height: 16),
       const Text(
-        'Direct children',
+        'Recursive manifest',
         style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
       ),
       const SizedBox(height: 8),
-      if (_inspectionResult!.children.isEmpty)
+      if (_manifestResult!.entries.isEmpty)
         const Text(
-          'This folder has no direct child entries.',
+          'This folder contains no recursive entries.',
           style: TextStyle(fontSize: 16),
         )
       else
-        ..._inspectionResult!.children.map(
-          (ChildEntry child) => ListTile(
+        ..._manifestResult!.entries.map(
+          (ManifestEntry entry) => ListTile(
             dense: true,
             contentPadding: EdgeInsets.zero,
-            leading: Icon(_iconForEntryType(child.entryType)),
-            title: Text(child.name),
-            subtitle: Text(child.entryType),
+            leading: Icon(_iconForEntryType(entry.entryType)),
+            title: Text(entry.relativePath),
+            subtitle: Text(
+              entry.sizeBytes != null
+                  ? '${entry.entryType} • ${_formatSize(entry.sizeBytes)}'
+                  : entry.entryType,
+            ),
           ),
         ),
     ];
@@ -299,8 +314,8 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             const SizedBox(width: 16),
             Expanded(
               child: ElevatedButton(
-                onPressed: _isRunning ? null : _inspectFolder,
-                child: Text(_isRunning ? 'Running...' : 'Inspect Folder'),
+                onPressed: _isRunning ? null : _buildManifest,
+                child: Text(_isRunning ? 'Running...' : 'Build Manifest'),
               ),
             ),
           ],
