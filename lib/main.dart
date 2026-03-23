@@ -1,14 +1,13 @@
-import 'dart:convert'; // Needed to decode JSON returned by Rust.
-import 'dart:io'; // Needed for Process.run to launch the Rust executable.
+import 'dart:convert';
+import 'dart:io';
 
-import 'package:file_selector/file_selector.dart'; // Folder picker plugin.
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 void main() {
   runApp(const FileStewardApp());
 }
 
-/// Top-level Flutter application object.
 class FileStewardApp extends StatelessWidget {
   const FileStewardApp({super.key});
 
@@ -22,7 +21,6 @@ class FileStewardApp extends StatelessWidget {
   }
 }
 
-/// Represents one child entry returned by Rust.
 class ChildEntry {
   final String name;
   final String entryType;
@@ -40,12 +38,14 @@ class ChildEntry {
   }
 }
 
-/// Represents the full folder inspection result returned by Rust.
 class FolderInspectionResult {
   final String selectedFolder;
   final bool exists;
   final bool isDirectory;
   final int directChildEntries;
+  final int directDirectories;
+  final int directFiles;
+  final int directOtherEntries;
   final List<ChildEntry> children;
 
   FolderInspectionResult({
@@ -53,6 +53,9 @@ class FolderInspectionResult {
     required this.exists,
     required this.isDirectory,
     required this.directChildEntries,
+    required this.directDirectories,
+    required this.directFiles,
+    required this.directOtherEntries,
     required this.children,
   });
 
@@ -64,6 +67,9 @@ class FolderInspectionResult {
       exists: json['exists'] as bool? ?? false,
       isDirectory: json['is_directory'] as bool? ?? false,
       directChildEntries: json['direct_child_entries'] as int? ?? 0,
+      directDirectories: json['direct_directories'] as int? ?? 0,
+      directFiles: json['direct_files'] as int? ?? 0,
+      directOtherEntries: json['direct_other_entries'] as int? ?? 0,
       children: rawChildren
           .map((dynamic item) =>
               ChildEntry.fromJson(item as Map<String, dynamic>))
@@ -72,7 +78,6 @@ class FolderInspectionResult {
   }
 }
 
-/// Main screen for the current folder-inspection milestone.
 class FileStewardHomePage extends StatefulWidget {
   const FileStewardHomePage({super.key});
 
@@ -81,25 +86,14 @@ class FileStewardHomePage extends StatefulWidget {
 }
 
 class _FileStewardHomePageState extends State<FileStewardHomePage> {
-  /// Folder selected by the user in the macOS folder picker.
   String? _selectedFolderPath;
-
-  /// Raw status or error text shown above the structured results.
   String _statusMessage = 'Choose a folder, then inspect it with Rust.';
-
-  /// Parsed inspection result returned by Rust.
   FolderInspectionResult? _inspectionResult;
-
-  /// Prevents repeated clicks while Rust is running.
   bool _isRunning = false;
 
-  /// Current hard-coded path to the compiled Rust executable.
-  ///
-  /// This is still temporary and development-only.
   String get _rustBinaryPath =>
       '/Users/karlborn/development/projects/filesteward_hello/rust_core/target/debug/rust_core';
 
-  /// Opens a macOS folder chooser and stores the selected path.
   Future<void> _chooseFolder() async {
     try {
       final String? directoryPath = await getDirectoryPath();
@@ -124,8 +118,6 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     }
   }
 
-  /// Runs the Rust executable and passes the selected folder path.
-  /// Rust returns JSON, which we decode into a Dart object.
   Future<void> _inspectFolder() async {
     if (_selectedFolderPath == null || _selectedFolderPath!.isEmpty) {
       setState(() {
@@ -179,7 +171,6 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     }
   }
 
-  /// Builds a simple icon for the child entry type.
   IconData _iconForEntryType(String entryType) {
     switch (entryType) {
       case 'directory':
@@ -191,6 +182,78 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     }
   }
 
+  Widget _buildSummaryCard(FolderInspectionResult result) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Wrap(
+          spacing: 24,
+          runSpacing: 16,
+          alignment: WrapAlignment.spaceEvenly,
+          children: <Widget>[
+            _SummaryItem(
+              label: 'Total',
+              value: result.directChildEntries.toString(),
+            ),
+            _SummaryItem(
+              label: 'Folders',
+              value: result.directDirectories.toString(),
+            ),
+            _SummaryItem(
+              label: 'Files',
+              value: result.directFiles.toString(),
+            ),
+            _SummaryItem(
+              label: 'Other',
+              value: result.directOtherEntries.toString(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildResultWidgets() {
+    if (_inspectionResult == null) {
+      return <Widget>[];
+    }
+
+    return <Widget>[
+      Text(
+        'Exists: ${_inspectionResult!.exists ? "yes" : "no"}',
+        style: const TextStyle(fontSize: 16),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        'Is directory: ${_inspectionResult!.isDirectory ? "yes" : "no"}',
+        style: const TextStyle(fontSize: 16),
+      ),
+      const SizedBox(height: 16),
+      _buildSummaryCard(_inspectionResult!),
+      const SizedBox(height: 16),
+      const Text(
+        'Direct children',
+        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 8),
+      if (_inspectionResult!.children.isEmpty)
+        const Text(
+          'This folder has no direct child entries.',
+          style: TextStyle(fontSize: 16),
+        )
+      else
+        ..._inspectionResult!.children.map(
+          (ChildEntry child) => ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(_iconForEntryType(child.entryType)),
+            title: Text(child.name),
+            subtitle: Text(child.entryType),
+          ),
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final String displayedPath = _selectedFolderPath ?? 'No folder selected';
@@ -199,7 +262,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       appBar: AppBar(
         title: const Text('FileSteward'),
       ),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(24, 24, 24, 120),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -219,53 +282,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               style: const TextStyle(fontSize: 16),
             ),
             const SizedBox(height: 24),
-            if (_inspectionResult != null) ...<Widget>[
-              Text(
-                'Exists: ${_inspectionResult!.exists ? "yes" : "no"}',
-                style: const TextStyle(fontSize: 16),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Is directory: ${_inspectionResult!.isDirectory ? "yes" : "no"}',
-                style: const TextStyle(fontSize: 16),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Direct child entries: ${_inspectionResult!.directChildEntries}',
-                style: const TextStyle(fontSize: 16),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Direct children',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: _inspectionResult!.children.isEmpty
-                    ? const Text(
-                        'This folder has no direct child entries.',
-                        style: TextStyle(fontSize: 16),
-                      )
-                    : ListView.builder(
-                        itemCount: _inspectionResult!.children.length,
-                        itemBuilder: (BuildContext context, int index) {
-                          final ChildEntry child =
-                              _inspectionResult!.children[index];
-
-                          return ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(_iconForEntryType(child.entryType)),
-                            title: Text(child.name),
-                            subtitle: Text(child.entryType),
-                          );
-                        },
-                      ),
-              ),
-            ] else
-              const Expanded(
-                child: SizedBox.shrink(),
-              ),
+            ..._buildResultWidgets(),
           ],
         ),
       ),
@@ -288,6 +305,38 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _SummaryItem extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _SummaryItem({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 120,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Text(
+            value,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 14),
+            textAlign: TextAlign.center,
+          ),
+        ],
       ),
     );
   }
