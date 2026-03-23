@@ -39,6 +39,20 @@ class ManifestEntry {
       sizeBytes: json['size_bytes'] as int?,
     );
   }
+
+  List<String> get pathParts =>
+      relativePath.split('/').where((part) => part.isNotEmpty).toList();
+
+  int get depth => pathParts.isEmpty ? 0 : pathParts.length - 1;
+
+  String get leafName => pathParts.isEmpty ? relativePath : pathParts.last;
+
+  String get parentPath {
+    if (pathParts.length <= 1) {
+      return '';
+    }
+    return pathParts.sublist(0, pathParts.length - 1).join('/');
+  }
 }
 
 class ManifestResult {
@@ -61,16 +75,37 @@ class ManifestResult {
   factory ManifestResult.fromJson(Map<String, dynamic> json) {
     final List<dynamic> rawEntries = json['entries'] as List<dynamic>? ?? [];
 
+    final entries = rawEntries
+        .map((dynamic item) =>
+            ManifestEntry.fromJson(item as Map<String, dynamic>))
+        .toList();
+
+    entries.sort((a, b) {
+      final pathCompare =
+          a.relativePath.toLowerCase().compareTo(b.relativePath.toLowerCase());
+      if (pathCompare != 0) {
+        return pathCompare;
+      }
+
+      if (a.entryType == b.entryType) {
+        return 0;
+      }
+      if (a.entryType == 'directory') {
+        return -1;
+      }
+      if (b.entryType == 'directory') {
+        return 1;
+      }
+      return a.entryType.compareTo(b.entryType);
+    });
+
     return ManifestResult(
       selectedFolder: json['selected_folder'] as String? ?? '',
       exists: json['exists'] as bool? ?? false,
       isDirectory: json['is_directory'] as bool? ?? false,
       totalDirectories: json['total_directories'] as int? ?? 0,
       totalFiles: json['total_files'] as int? ?? 0,
-      entries: rawEntries
-          .map((dynamic item) =>
-              ManifestEntry.fromJson(item as Map<String, dynamic>))
-          .toList(),
+      entries: entries,
     );
   }
 }
@@ -182,7 +217,6 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     if (sizeBytes == null) {
       return '';
     }
-
     if (sizeBytes < 1024) {
       return '$sizeBytes B';
     }
@@ -224,6 +258,29 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     );
   }
 
+  Widget _buildManifestTile(ManifestEntry entry) {
+    final double leftIndent = entry.depth * 20.0;
+
+    String subtitle = entry.entryType;
+    if (entry.parentPath.isNotEmpty) {
+      subtitle = '${entry.parentPath} • $subtitle';
+    }
+    if (entry.sizeBytes != null) {
+      subtitle = '$subtitle • ${_formatSize(entry.sizeBytes)}';
+    }
+
+    return Padding(
+      padding: EdgeInsets.only(left: leftIndent),
+      child: ListTile(
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(_iconForEntryType(entry.entryType)),
+        title: Text(entry.leafName),
+        subtitle: Text(subtitle),
+      ),
+    );
+  }
+
   List<Widget> _buildResultWidgets() {
     if (_manifestResult == null) {
       return <Widget>[];
@@ -253,19 +310,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
           style: TextStyle(fontSize: 16),
         )
       else
-        ..._manifestResult!.entries.map(
-          (ManifestEntry entry) => ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(_iconForEntryType(entry.entryType)),
-            title: Text(entry.relativePath),
-            subtitle: Text(
-              entry.sizeBytes != null
-                  ? '${entry.entryType} • ${_formatSize(entry.sizeBytes)}'
-                  : entry.entryType,
-            ),
-          ),
-        ),
+        ..._manifestResult!.entries.map(_buildManifestTile),
     ];
   }
 
