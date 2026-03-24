@@ -1,6 +1,6 @@
 {
-    "name": "filesteward_hello",
-    "short_name": "filesteward_hello",
+    "name": "FileSteward",
+    "short_name": "FileSteward",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

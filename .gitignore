@@ -44,3 +44,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# FileSteward runtime output
+/agent_board_status/
+/dev_status/
+
+# Claude Code workspace
+/.claude/

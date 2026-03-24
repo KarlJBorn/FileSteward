@@ -1,5 +1,5 @@
-name: filesteward_hello
-description: A hello-world FileSteward app.
+name: filesteward
+description: A macOS-first FileSteward prototype.
 publish_to: 'none'
 version: 1.0.0+1
 

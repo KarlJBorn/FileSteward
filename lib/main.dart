@@ -1,8 +1,12 @@
-import 'dart:convert';
-import 'dart:io';
+import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+
+import 'agent_board_status_writer.dart';
+import 'manifest_filter.dart';
+import 'manifest_models.dart';
+import 'manifest_service.dart';
 
 void main() {
   runApp(const FileStewardApp());
@@ -21,95 +25,6 @@ class FileStewardApp extends StatelessWidget {
   }
 }
 
-class ManifestEntry {
-  final String relativePath;
-  final String entryType;
-  final int? sizeBytes;
-
-  ManifestEntry({
-    required this.relativePath,
-    required this.entryType,
-    required this.sizeBytes,
-  });
-
-  factory ManifestEntry.fromJson(Map<String, dynamic> json) {
-    return ManifestEntry(
-      relativePath: json['relative_path'] as String? ?? '',
-      entryType: json['entry_type'] as String? ?? 'other',
-      sizeBytes: json['size_bytes'] as int?,
-    );
-  }
-
-  List<String> get pathParts =>
-      relativePath.split('/').where((part) => part.isNotEmpty).toList();
-
-  int get depth => pathParts.isEmpty ? 0 : pathParts.length - 1;
-
-  String get leafName => pathParts.isEmpty ? relativePath : pathParts.last;
-
-  String get parentPath {
-    if (pathParts.length <= 1) {
-      return '';
-    }
-    return pathParts.sublist(0, pathParts.length - 1).join('/');
-  }
-}
-
-class ManifestResult {
-  final String selectedFolder;
-  final bool exists;
-  final bool isDirectory;
-  final int totalDirectories;
-  final int totalFiles;
-  final List<ManifestEntry> entries;
-
-  ManifestResult({
-    required this.selectedFolder,
-    required this.exists,
-    required this.isDirectory,
-    required this.totalDirectories,
-    required this.totalFiles,
-    required this.entries,
-  });
-
-  factory ManifestResult.fromJson(Map<String, dynamic> json) {
-    final List<dynamic> rawEntries = json['entries'] as List<dynamic>? ?? [];
-
-    final entries = rawEntries
-        .map((dynamic item) =>
-            ManifestEntry.fromJson(item as Map<String, dynamic>))
-        .toList();
-
-    entries.sort((a, b) {
-      final pathCompare =
-          a.relativePath.toLowerCase().compareTo(b.relativePath.toLowerCase());
-      if (pathCompare != 0) {
-        return pathCompare;
-      }
-
-      if (a.entryType == b.entryType) {
-        return 0;
-      }
-      if (a.entryType == 'directory') {
-        return -1;
-      }
-      if (b.entryType == 'directory') {
-        return 1;
-      }
-      return a.entryType.compareTo(b.entryType);
-    });
-
-    return ManifestResult(
-      selectedFolder: json['selected_folder'] as String? ?? '',
-      exists: json['exists'] as bool? ?? false,
-      isDirectory: json['is_directory'] as bool? ?? false,
-      totalDirectories: json['total_directories'] as int? ?? 0,
-      totalFiles: json['total_files'] as int? ?? 0,
-      entries: entries,
-    );
-  }
-}
-
 class FileStewardHomePage extends StatefulWidget {
   const FileStewardHomePage({super.key});
 
@@ -118,13 +33,250 @@ class FileStewardHomePage extends StatefulWidget {
 }
 
 class _FileStewardHomePageState extends State<FileStewardHomePage> {
+  final ManifestService _manifestService = const ManifestService();
+  final AgentBoardStatusWriter _statusWriter = const AgentBoardStatusWriter();
   String? _selectedFolderPath;
   String _statusMessage = 'Choose a folder, then build a recursive manifest.';
   ManifestResult? _manifestResult;
   bool _isRunning = false;
+  ManifestEntryFilter _entryFilter = ManifestEntryFilter.all;
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+  Timer? _commandPoller;
 
-  String get _rustBinaryPath =>
-      '/Users/karlborn/development/projects/filesteward_hello/rust_core/target/debug/rust_core';
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(_handleSearchChanged);
+    _commandPoller = Timer.periodic(const Duration(seconds: 2), (_) {
+      _checkForCommands();
+    });
+    _writeDashboardStatus(
+      status: 'waiting',
+      progressLabel: 'Choose a folder to begin.',
+      taskTitle: 'Await folder selection',
+      taskSummary: 'FileSteward is idle and waiting for a folder to inspect.',
+      checkpoint: 'Choose Folder',
+    );
+  }
+
+  @override
+  void dispose() {
+    _commandPoller?.cancel();
+    _searchController
+      ..removeListener(_handleSearchChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _handleSearchChanged() {
+    final nextQuery = _searchController.text;
+    if (nextQuery == _searchQuery) {
+      return;
+    }
+
+    setState(() {
+      _searchQuery = nextQuery;
+    });
+  }
+
+  Future<void> _checkForCommands() async {
+    final commands = await _statusWriter.readPendingCommands(
+      agentId: 'filesteward',
+    );
+    for (final command in commands) {
+      await _handleCommand(command);
+    }
+  }
+
+  Future<void> _handleCommand(AgentBoardCommand command) async {
+    switch (command.command) {
+      case 'approve':
+        setState(() {
+          _statusMessage = 'Approval received from AgentBoard.';
+        });
+        await _writeDashboardStatus(
+          status: 'waiting',
+          progressLabel: _selectedFolderPath == null
+              ? 'Approval received. Choose a folder to continue.'
+              : 'Approval received. Ready to continue.',
+          taskTitle: 'Approval received',
+          taskSummary: _selectedFolderPath == null
+              ? 'AgentBoard approved the workflow. Choose a folder to continue.'
+              : 'AgentBoard approved the workflow. Ready for the next manifest action.',
+          checkpoint: _selectedFolderPath == null
+              ? 'Choose Folder'
+              : 'Build Manifest',
+          eventType: 'approval',
+          eventMessage: 'Received approval from AgentBoard.',
+        );
+        await _statusWriter.appendReceipt(
+          commandId: command.id,
+          outcome: 'processed',
+          message: 'Approval acknowledged.',
+        );
+        break;
+      case 'retry':
+        await _statusWriter.appendReceipt(
+          commandId: command.id,
+          outcome: 'processed',
+          message: 'Retry requested.',
+        );
+        if (!_isRunning && _selectedFolderPath != null) {
+          unawaited(_buildManifest());
+        } else {
+          await _writeDashboardStatus(
+            status: _selectedFolderPath == null ? 'needs_approval' : 'paused',
+            progressLabel:
+                'Retry requested but no runnable task is available yet.',
+            taskTitle: 'Retry deferred',
+            taskSummary: _selectedFolderPath == null
+                ? 'Retry requested before a folder was selected.'
+                : 'Retry requested while FileSteward is already running.',
+            checkpoint: _selectedFolderPath == null
+                ? 'Choose Folder'
+                : 'Wait for current run',
+            eventType: 'note',
+            eventMessage: 'Retry requested but no runnable task was available.',
+          );
+        }
+        break;
+      case 'request_checkpoint':
+        final derivedStatus = _deriveStatus();
+        await _writeDashboardStatus(
+          status: derivedStatus,
+          progressLabel: _deriveProgressLabel(),
+          taskTitle: _deriveTaskTitle(),
+          taskSummary: _deriveTaskSummary(),
+          checkpoint: _deriveCheckpoint(),
+          isBlocked: derivedStatus == 'blocked',
+          selectedFolderPath: _selectedFolderPath,
+          eventType: 'checkpoint',
+          eventMessage: 'Checkpoint requested from AgentBoard.',
+        );
+        await _statusWriter.appendReceipt(
+          commandId: command.id,
+          outcome: 'processed',
+          message: 'Checkpoint emitted.',
+        );
+        break;
+      default:
+        await _statusWriter.appendReceipt(
+          commandId: command.id,
+          outcome: 'ignored',
+          message: 'Unknown command ${command.command}.',
+        );
+    }
+  }
+
+  String _deriveStatus() {
+    if (_isRunning) {
+      return 'working';
+    }
+    if (_manifestResult != null) {
+      return 'completed';
+    }
+    if (_statusMessage.startsWith('Error') ||
+        _statusMessage.startsWith('Rust failed')) {
+      return 'blocked';
+    }
+    if (_statusMessage == 'Choose a folder first.') {
+      return 'needs_approval';
+    }
+    return 'waiting';
+  }
+
+  String _deriveProgressLabel() {
+    if (_isRunning) {
+      return 'Building recursive manifest.';
+    }
+    if (_manifestResult != null) {
+      return 'Manifest ready for review.';
+    }
+    if (_selectedFolderPath != null) {
+      return 'Folder selected and ready for manifest build.';
+    }
+    return 'Choose a folder to begin.';
+  }
+
+  String _deriveTaskTitle() {
+    if (_isRunning) {
+      return 'Build recursive manifest';
+    }
+    if (_manifestResult != null) {
+      return 'Manifest build completed';
+    }
+    if (_selectedFolderPath != null) {
+      return 'Folder selected';
+    }
+    return 'Await folder selection';
+  }
+
+  String _deriveTaskSummary() {
+    if (_isRunning) {
+      return 'Invoking the Rust manifest builder for $_selectedFolderPath.';
+    }
+    if (_manifestResult != null) {
+      return 'Manifest completed for ${_manifestResult!.selectedFolder}.';
+    }
+    if (_selectedFolderPath != null) {
+      return 'Ready to build a recursive manifest for $_selectedFolderPath.';
+    }
+    return 'FileSteward is idle and waiting for a folder to inspect.';
+  }
+
+  String _deriveCheckpoint() {
+    if (_isRunning) {
+      return 'Parse Rust JSON output';
+    }
+    if (_manifestResult != null) {
+      return 'Review manifest';
+    }
+    if (_selectedFolderPath != null) {
+      return 'Build Manifest';
+    }
+    return 'Choose Folder';
+  }
+
+  Future<void> _writeDashboardStatus({
+    required String status,
+    required String progressLabel,
+    required String taskTitle,
+    required String taskSummary,
+    required String checkpoint,
+    String? selectedFolderPath,
+    String? eventType,
+    String? eventMessage,
+    bool isBlocked = false,
+    List<String> filesTouched = const <String>[],
+    List<String> commandsRun = const <String>[],
+  }) async {
+    try {
+      await _statusWriter.writeStatus(
+        selectedFolderPath: selectedFolderPath ?? _selectedFolderPath,
+        status: status,
+        progressLabel: progressLabel,
+        taskTitle: taskTitle,
+        taskSummary: taskSummary,
+        checkpoint: checkpoint,
+        isBlocked: isBlocked,
+        filesTouched: filesTouched,
+        commandsRun: commandsRun,
+      );
+
+      if (eventType != null && eventMessage != null) {
+        await _statusWriter.appendEvent(
+          status: status,
+          type: eventType,
+          message: eventMessage,
+          files: filesTouched,
+          commands: commandsRun,
+        );
+      }
+    } catch (_) {
+      // Status output should never block the main FileSteward workflow.
+    }
+  }
 
   Future<void> _chooseFolder() async {
     try {
@@ -134,19 +286,49 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         setState(() {
           _statusMessage = 'Folder selection was canceled.';
         });
+        await _writeDashboardStatus(
+          status: 'waiting',
+          progressLabel: 'Folder selection canceled.',
+          taskTitle: 'Await folder selection',
+          taskSummary: 'The folder picker was dismissed without a selection.',
+          checkpoint: 'Choose Folder',
+          eventType: 'note',
+          eventMessage: 'Folder selection was canceled.',
+        );
         return;
       }
 
       setState(() {
         _selectedFolderPath = directoryPath;
         _manifestResult = null;
+        _entryFilter = ManifestEntryFilter.all;
+        _searchController.clear();
         _statusMessage = 'Selected folder:\n$directoryPath';
       });
+      await _writeDashboardStatus(
+        status: 'waiting',
+        progressLabel: 'Folder selected and ready for manifest build.',
+        taskTitle: 'Folder selected',
+        taskSummary: 'Ready to build a recursive manifest for $directoryPath.',
+        checkpoint: 'Build Manifest',
+        eventType: 'selection',
+        eventMessage: 'Selected folder: $directoryPath',
+      );
     } catch (e) {
       setState(() {
         _manifestResult = null;
         _statusMessage = 'Error choosing folder:\n\n$e';
       });
+      await _writeDashboardStatus(
+        status: 'blocked',
+        progressLabel: 'Folder selection failed.',
+        taskTitle: 'Folder selection error',
+        taskSummary: 'FileSteward could not complete folder selection.',
+        checkpoint: 'Retry Choose Folder',
+        eventType: 'error',
+        eventMessage: 'Folder selection failed: $e',
+        isBlocked: true,
+      );
     }
   }
 
@@ -156,6 +338,16 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         _manifestResult = null;
         _statusMessage = 'Choose a folder first.';
       });
+      await _writeDashboardStatus(
+        status: 'needs_approval',
+        progressLabel: 'Waiting for a folder to be selected.',
+        taskTitle: 'Choose target folder',
+        taskSummary:
+            'FileSteward needs a folder selection before it can build a manifest.',
+        checkpoint: 'Choose Folder',
+        eventType: 'note',
+        eventMessage: 'Build was requested before a folder was selected.',
+      );
       return;
     }
 
@@ -164,37 +356,74 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       _manifestResult = null;
       _statusMessage = 'Building recursive manifest...';
     });
+    await _writeDashboardStatus(
+      status: 'working',
+      progressLabel: 'Building recursive manifest.',
+      taskTitle: 'Build recursive manifest',
+      taskSummary:
+          'Invoking the Rust manifest builder for $_selectedFolderPath.',
+      checkpoint: 'Parse Rust JSON output',
+      eventType: 'start',
+      eventMessage: 'Started manifest build for $_selectedFolderPath',
+      commandsRun: const <String>[
+        'cargo build --manifest-path rust_core/Cargo.toml',
+        'rust_core/target/debug/rust_core <selected-folder>',
+      ],
+    );
 
     try {
-      final processResult = await Process.run(
-        _rustBinaryPath,
-        <String>[_selectedFolderPath!],
+      final ManifestResult parsedResult = await _manifestService.buildManifest(
+        _selectedFolderPath!,
       );
-
-      final String stdoutText = processResult.stdout.toString().trim();
-      final String stderrText = processResult.stderr.toString().trim();
-
-      if (processResult.exitCode != 0) {
-        setState(() {
-          _statusMessage = 'Rust failed.\n\n$stderrText';
-        });
-        return;
-      }
-
-      final Map<String, dynamic> decodedJson =
-          jsonDecode(stdoutText) as Map<String, dynamic>;
-
-      final ManifestResult parsedResult = ManifestResult.fromJson(decodedJson);
 
       setState(() {
         _manifestResult = parsedResult;
+        _entryFilter = ManifestEntryFilter.all;
+        _searchController.clear();
         _statusMessage = 'Recursive manifest completed.';
       });
+      await _writeDashboardStatus(
+        status: 'completed',
+        progressLabel:
+            'Manifest complete: ${parsedResult.totalDirectories} folders, ${parsedResult.totalFiles} files.',
+        taskTitle: 'Manifest build completed',
+        taskSummary:
+            'Completed manifest for ${parsedResult.selectedFolder} with ${parsedResult.entries.length} total entries.',
+        checkpoint: 'Review manifest',
+        eventType: 'completed',
+        eventMessage:
+            'Manifest completed for ${parsedResult.selectedFolder} with ${parsedResult.entries.length} entries.',
+      );
+    } on ManifestServiceException catch (e) {
+      setState(() {
+        _manifestResult = null;
+        _statusMessage = e.message;
+      });
+      await _writeDashboardStatus(
+        status: 'blocked',
+        progressLabel: 'Manifest build failed.',
+        taskTitle: 'Manifest build error',
+        taskSummary: e.message,
+        checkpoint: 'Retry Build Manifest',
+        eventType: 'error',
+        eventMessage: 'Manifest build failed: ${e.message}',
+        isBlocked: true,
+      );
     } catch (e) {
       setState(() {
         _manifestResult = null;
         _statusMessage = 'Error running Rust:\n\n$e';
       });
+      await _writeDashboardStatus(
+        status: 'blocked',
+        progressLabel: 'Unexpected runtime error.',
+        taskTitle: 'Runtime error',
+        taskSummary: 'Error running Rust: $e',
+        checkpoint: 'Retry Build Manifest',
+        eventType: 'error',
+        eventMessage: 'Unexpected runtime error: $e',
+        isBlocked: true,
+      );
     } finally {
       setState(() {
         _isRunning = false;
@@ -240,18 +469,12 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
           runSpacing: 16,
           alignment: WrapAlignment.spaceEvenly,
           children: <Widget>[
-            _SummaryItem(
-              label: 'Entries',
-              value: totalEntries.toString(),
-            ),
+            _SummaryItem(label: 'Entries', value: totalEntries.toString()),
             _SummaryItem(
               label: 'Folders',
               value: result.totalDirectories.toString(),
             ),
-            _SummaryItem(
-              label: 'Files',
-              value: result.totalFiles.toString(),
-            ),
+            _SummaryItem(label: 'Files', value: result.totalFiles.toString()),
           ],
         ),
       ),
@@ -281,36 +504,128 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     );
   }
 
+  List<ManifestEntry> get _visibleEntries {
+    final manifestResult = _manifestResult;
+    if (manifestResult == null) {
+      return <ManifestEntry>[];
+    }
+
+    return filterManifestEntries(
+      entries: manifestResult.entries,
+      filter: _entryFilter,
+      query: _searchQuery,
+    );
+  }
+
+  Widget _buildReviewControls(ManifestResult result) {
+    final visibleEntries = _visibleEntries;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const Text(
+          'Review manifest',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _searchController,
+          decoration: InputDecoration(
+            labelText: 'Search paths',
+            hintText: 'Filter by relative path',
+            border: const OutlineInputBorder(),
+            suffixIcon: _searchQuery.trim().isEmpty
+                ? null
+                : IconButton(
+                    onPressed: _searchController.clear,
+                    icon: const Icon(Icons.clear),
+                    tooltip: 'Clear search',
+                  ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            ChoiceChip(
+              label: const Text('All'),
+              selected: _entryFilter == ManifestEntryFilter.all,
+              onSelected: (_) {
+                setState(() {
+                  _entryFilter = ManifestEntryFilter.all;
+                });
+              },
+            ),
+            ChoiceChip(
+              label: const Text('Folders'),
+              selected: _entryFilter == ManifestEntryFilter.directories,
+              onSelected: (_) {
+                setState(() {
+                  _entryFilter = ManifestEntryFilter.directories;
+                });
+              },
+            ),
+            ChoiceChip(
+              label: const Text('Files'),
+              selected: _entryFilter == ManifestEntryFilter.files,
+              onSelected: (_) {
+                setState(() {
+                  _entryFilter = ManifestEntryFilter.files;
+                });
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'Showing ${visibleEntries.length} of ${result.entries.length} entries',
+          style: const TextStyle(fontSize: 16),
+        ),
+      ],
+    );
+  }
+
   List<Widget> _buildResultWidgets() {
-    if (_manifestResult == null) {
+    final manifestResult = _manifestResult;
+    if (manifestResult == null) {
       return <Widget>[];
     }
 
+    final visibleEntries = _visibleEntries;
+
     return <Widget>[
       Text(
-        'Exists: ${_manifestResult!.exists ? "yes" : "no"}',
+        'Exists: ${manifestResult.exists ? "yes" : "no"}',
         style: const TextStyle(fontSize: 16),
       ),
       const SizedBox(height: 8),
       Text(
-        'Is directory: ${_manifestResult!.isDirectory ? "yes" : "no"}',
+        'Is directory: ${manifestResult.isDirectory ? "yes" : "no"}',
         style: const TextStyle(fontSize: 16),
       ),
       const SizedBox(height: 16),
-      _buildSummaryCard(_manifestResult!),
+      _buildSummaryCard(manifestResult),
+      const SizedBox(height: 16),
+      _buildReviewControls(manifestResult),
       const SizedBox(height: 16),
       const Text(
         'Recursive manifest',
         style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
       ),
       const SizedBox(height: 8),
-      if (_manifestResult!.entries.isEmpty)
+      if (manifestResult.entries.isEmpty)
         const Text(
           'This folder contains no recursive entries.',
           style: TextStyle(fontSize: 16),
         )
+      else if (visibleEntries.isEmpty)
+        const Text(
+          'No entries match the current review filters.',
+          style: TextStyle(fontSize: 16),
+        )
       else
-        ..._manifestResult!.entries.map(_buildManifestTile),
+        ...visibleEntries.map(_buildManifestTile),
     ];
   }
 
@@ -319,9 +634,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     final String displayedPath = _selectedFolderPath ?? 'No folder selected';
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('FileSteward'),
-      ),
+      appBar: AppBar(title: const Text('FileSteward')),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(24, 24, 24, 120),
         child: Column(
@@ -332,15 +645,9 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            Text(
-              displayedPath,
-              style: const TextStyle(fontSize: 16),
-            ),
+            Text(displayedPath, style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 24),
-            Text(
-              _statusMessage,
-              style: const TextStyle(fontSize: 16),
-            ),
+            Text(_statusMessage, style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 24),
             ..._buildResultWidgets(),
           ],
@@ -374,10 +681,7 @@ class _SummaryItem extends StatelessWidget {
   final String label;
   final String value;
 
-  const _SummaryItem({
-    required this.label,
-    required this.value,
-  });
+  const _SummaryItem({required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
