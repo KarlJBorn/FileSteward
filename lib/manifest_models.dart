@@ -2,11 +2,13 @@ class ManifestEntry {
   final String relativePath;
   final String entryType;
   final int? sizeBytes;
+  final String? sha256;
 
   ManifestEntry({
     required this.relativePath,
     required this.entryType,
     required this.sizeBytes,
+    this.sha256,
   });
 
   factory ManifestEntry.fromJson(Map<String, dynamic> json) {
@@ -14,6 +16,7 @@ class ManifestEntry {
       relativePath: json['relative_path'] as String? ?? '',
       entryType: json['entry_type'] as String? ?? 'other',
       sizeBytes: json['size_bytes'] as int?,
+      sha256: json['sha256'] as String?,
     );
   }
 
@@ -39,6 +42,7 @@ class ManifestResult {
   final int totalDirectories;
   final int totalFiles;
   final List<ManifestEntry> entries;
+  final List<List<String>> duplicateGroups;
 
   ManifestResult({
     required this.selectedFolder,
@@ -47,6 +51,7 @@ class ManifestResult {
     required this.totalDirectories,
     required this.totalFiles,
     required this.entries,
+    this.duplicateGroups = const [],
   });
 
   factory ManifestResult.fromJson(Map<String, dynamic> json) {
@@ -79,6 +84,15 @@ class ManifestResult {
       return a.entryType.compareTo(b.entryType);
     });
 
+    final List<dynamic> rawGroups =
+        json['duplicate_groups'] as List<dynamic>? ?? [];
+    final duplicateGroups = rawGroups
+        .map(
+          (dynamic group) =>
+              (group as List<dynamic>).map((e) => e as String).toList(),
+        )
+        .toList();
+
     return ManifestResult(
       selectedFolder: json['selected_folder'] as String? ?? '',
       exists: json['exists'] as bool? ?? false,
@@ -86,6 +100,7 @@ class ManifestResult {
       totalDirectories: json['total_directories'] as int? ?? 0,
       totalFiles: json['total_files'] as int? ?? 0,
       entries: entries,
+      duplicateGroups: duplicateGroups,
     );
   }
 }
