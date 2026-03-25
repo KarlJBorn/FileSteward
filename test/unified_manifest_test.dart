@@ -194,5 +194,31 @@ void main() {
       final manifest = UnifiedManifest.from([source1, source2]);
       expect(manifest.crossSourceGroupCount, 2);
     });
+
+    test('cross-source groups are sorted alphabetically by first member path', () {
+      // beta.jpg sorts before gamma.jpg alphabetically, so its group should
+      // appear first regardless of the order entries are added.
+      final source1 = makeSource(
+        folder: '/disk1',
+        entries: [
+          makeFile('gamma.jpg', sha256: 'gg1111'),
+          makeFile('beta.jpg', sha256: 'bb2222'),
+        ],
+      );
+      final source2 = makeSource(
+        folder: '/disk2',
+        entries: [
+          makeFile('gamma.jpg', sha256: 'gg1111'),
+          makeFile('beta.jpg', sha256: 'bb2222'),
+        ],
+      );
+
+      final manifest = UnifiedManifest.from([source1, source2]);
+      expect(manifest.crossSourceGroups.length, 2);
+      // First group's first member path should sort before the second group's.
+      final firstPath = manifest.crossSourceGroups[0].members.first.absolutePath;
+      final secondPath = manifest.crossSourceGroups[1].members.first.absolutePath;
+      expect(firstPath.compareTo(secondPath), lessThan(0));
+    });
   });
 }
