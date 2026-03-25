@@ -36,6 +36,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   String _statusMessage = 'Choose a folder, then build a recursive manifest.';
   ManifestResult? _manifestResult;
   bool _isRunning = false;
+  bool _forceRescan = false;
   double? _scanProgress; // null = idle, 0.0–1.0 = in progress
   int _filesScanned = 0;
   int _totalFiles = 0;
@@ -113,8 +114,10 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     });
 
     try {
-      await for (final ScanEvent event
-          in _manifestService.buildManifestStreaming(_selectedFolderPath!)) {
+      await for (final ScanEvent event in _manifestService.buildManifestStreaming(
+        _selectedFolderPath!,
+        forceRescan: _forceRescan,
+      )) {
         switch (event) {
           case ScanProgress(:final filesScanned, :final totalFiles):
             // Throttle UI rebuilds to ~30fps to avoid widget-tree churn on
@@ -487,20 +490,37 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       ),
       bottomNavigationBar: Padding(
         padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Expanded(
-              child: ElevatedButton(
-                onPressed: _chooseFolder,
-                child: const Text('Choose Folder'),
-              ),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _chooseFolder,
+                    child: const Text('Choose Folder'),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _isRunning ? null : _buildManifest,
+                    child: Text(_isRunning ? 'Scanning…' : 'Build Manifest'),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: ElevatedButton(
-                onPressed: _isRunning ? null : _buildManifest,
-                child: Text(_isRunning ? 'Running...' : 'Build Manifest'),
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: <Widget>[
+                const Text('Force rescan', style: TextStyle(fontSize: 13)),
+                Switch(
+                  value: _forceRescan,
+                  onChanged: _isRunning
+                      ? null
+                      : (value) => setState(() => _forceRescan = value),
+                ),
+              ],
             ),
           ],
         ),

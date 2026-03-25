@@ -1,5 +1,5 @@
 use hex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
@@ -8,16 +8,23 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-#[derive(Serialize)]
+/// The name of the cache file written next to each scanned folder.
+/// Excluded from manifests so it does not appear as an entry.
+const CACHE_FILENAME: &str = ".filesteward_manifest.json";
+
+#[derive(Serialize, Deserialize)]
 struct ManifestEntry {
     relative_path: String,
     entry_type: String,
+    #[serde(default)]
     size_bytes: Option<u64>,
+    #[serde(default)]
     sha256: Option<String>,
+    #[serde(default)]
     modified_secs: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ManifestResult {
     selected_folder: String,
     exists: bool,
@@ -25,6 +32,7 @@ struct ManifestResult {
     total_directories: usize,
     total_files: usize,
     entries: Vec<ManifestEntry>,
+    #[serde(default)]
     duplicate_groups: Vec<Vec<String>>,
 }
 
@@ -61,6 +69,9 @@ fn count_files(root: &Path) -> usize {
         for entry_result in read_dir {
             if let Ok(entry) = entry_result {
                 let path = entry.path();
+                if path.file_name().and_then(|n| n.to_str()) == Some(CACHE_FILENAME) {
+                    continue;
+                }
                 if path.is_dir() {
                     count += count_files(&path);
                 } else if path.is_file() {
@@ -117,6 +128,142 @@ fn build_duplicate_groups(entries: &[ManifestEntry]) -> Vec<Vec<String>> {
     groups
 }
 
+// ---------------------------------------------------------------------------
+// Persistent manifest cache
+// ---------------------------------------------------------------------------
+
+fn cache_path(folder_path: &Path) -> PathBuf {
+    folder_path.join(CACHE_FILENAME)
+}
+
+/// Load a previously saved manifest from disk. Returns None if the file does
+/// not exist or cannot be parsed (e.g. written by an older version).
+fn load_cached_manifest(folder_path: &Path) -> Option<ManifestResult> {
+    let content = fs::read_to_string(cache_path(folder_path)).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Walk the directory collecting only (relative_path, size_bytes, modified_secs)
+/// for each file — no hashing. Used to validate the cache cheaply.
+/// Returns false if any I/O error occurs; caller treats that as cache-invalid.
+fn collect_file_metadata(
+    root_path: &Path,
+    current_path: &Path,
+    result: &mut HashMap<String, (Option<u64>, Option<u64>)>,
+) -> bool {
+    let read_dir = match fs::read_dir(current_path) {
+        Ok(rd) => rd,
+        Err(_) => return false,
+    };
+    for entry_result in read_dir {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let path = entry.path();
+        // Skip the cache file itself so it never ends up in comparisons.
+        if path.file_name().and_then(|n| n.to_str()) == Some(CACHE_FILENAME) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if metadata.is_dir() {
+            if !collect_file_metadata(root_path, &path, result) {
+                return false;
+            }
+        } else if metadata.is_file() {
+            let relative = match path.strip_prefix(root_path) {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(_) => return false,
+            };
+            result.insert(relative, (Some(metadata.len()), get_modified_secs(&metadata)));
+        }
+    }
+    true
+}
+
+/// Returns true if every file in the cache matches the current disk state
+/// (same count, same size, same mtime for each file).
+fn is_cache_valid(cached: &ManifestResult, root_path: &Path) -> bool {
+    let cached_files: HashMap<&str, (Option<u64>, Option<u64>)> = cached
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == "file")
+        .map(|e| (e.relative_path.as_str(), (e.size_bytes, e.modified_secs)))
+        .collect();
+
+    let mut disk_files: HashMap<String, (Option<u64>, Option<u64>)> = HashMap::new();
+    if !collect_file_metadata(root_path, root_path, &mut disk_files) {
+        return false;
+    }
+
+    if cached_files.len() != disk_files.len() {
+        return false;
+    }
+
+    for (path, (disk_size, disk_mtime)) in &disk_files {
+        match cached_files.get(path.as_str()) {
+            None => return false,
+            Some((cached_size, cached_mtime)) => {
+                if disk_size != cached_size || disk_mtime != cached_mtime {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Save the manifest next to the scanned folder as CACHE_FILENAME.
+/// Writes to a temp file first then renames atomically. Failures are
+/// non-fatal — a missing or stale cache just causes a full rescan next time.
+fn save_manifest(folder_path: &Path, result: &ManifestResult) {
+    let tmp = folder_path.join(".filesteward_manifest.tmp");
+    if let Ok(json) = serde_json::to_string(result) {
+        if fs::write(&tmp, &json).is_ok() {
+            let _ = fs::rename(&tmp, cache_path(folder_path));
+        }
+    }
+}
+
+/// Emit the final result in the appropriate format (streaming NDJSON line or
+/// pretty-printed batch JSON).
+fn emit_result(streaming: bool, result: ManifestResult) {
+    if streaming {
+        #[derive(Serialize)]
+        struct ResultEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            #[serde(flatten)]
+            result: ManifestResult,
+        }
+        let event = ResultEvent {
+            event_type: "result",
+            result,
+        };
+        match serde_json::to_string(&event) {
+            Ok(json) => {
+                println!("{}", json);
+                io::stdout().flush().ok();
+            }
+            Err(err) => {
+                eprintln!("Failed to serialize JSON: {}", err);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match serde_json::to_string_pretty(&result) {
+            Ok(json) => println!("{}", json),
+            Err(err) => {
+                eprintln!("Failed to serialize JSON: {}", err);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -127,11 +274,24 @@ fn main() {
 
     let folder_path = &args[1];
     let streaming = args.contains(&"--stream-progress".to_string());
+    let force_rescan = args.contains(&"--force-rescan".to_string());
     let root_path = Path::new(folder_path);
 
     let exists = root_path.exists();
     let is_directory = root_path.is_dir();
 
+    // Cache hit path: load and validate the saved manifest. If valid, emit it
+    // directly without hashing anything. Skip on --force-rescan.
+    if !force_rescan && exists && is_directory {
+        if let Some(cached) = load_cached_manifest(root_path) {
+            if is_cache_valid(&cached, root_path) {
+                emit_result(streaming, cached);
+                return;
+            }
+        }
+    }
+
+    // Full scan path.
     let mut entries: Vec<ManifestEntry> = Vec::new();
     let mut total_directories: usize = 0;
     let mut total_files: usize = 0;
@@ -188,40 +348,13 @@ fn main() {
         entries,
     };
 
-    if streaming {
-        // Emit the final manifest as a single compact NDJSON line with a
-        // "type":"result" discriminator so Flutter can distinguish it from
-        // progress events.
-        #[derive(Serialize)]
-        struct ResultEvent {
-            #[serde(rename = "type")]
-            event_type: &'static str,
-            #[serde(flatten)]
-            result: ManifestResult,
-        }
-        let event = ResultEvent {
-            event_type: "result",
-            result,
-        };
-        match serde_json::to_string(&event) {
-            Ok(json) => {
-                println!("{}", json);
-                io::stdout().flush().ok();
-            }
-            Err(err) => {
-                eprintln!("Failed to serialize JSON: {}", err);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        match serde_json::to_string_pretty(&result) {
-            Ok(json) => println!("{}", json),
-            Err(err) => {
-                eprintln!("Failed to serialize JSON: {}", err);
-                std::process::exit(1);
-            }
-        }
+    // Persist the manifest so the next scan can skip hashing if nothing changed.
+    // Write failures are non-fatal (e.g. read-only volumes).
+    if exists && is_directory {
+        save_manifest(root_path, &result);
     }
+
+    emit_result(streaming, result);
 }
 
 fn walk_directory(
@@ -240,6 +373,11 @@ fn walk_directory(
         let entry = entry_result.map_err(|err| err.to_string())?;
         let entry_path: PathBuf = entry.path();
         let metadata = entry.metadata().map_err(|err| err.to_string())?;
+
+        // Skip the cache file so it never appears as a manifest entry.
+        if entry_path.file_name().and_then(|n| n.to_str()) == Some(CACHE_FILENAME) {
+            continue;
+        }
 
         let relative_path = entry_path
             .strip_prefix(root_path)
@@ -569,6 +707,137 @@ mod tests {
         assert!(
             !grouped_paths.contains(&"delta.txt"),
             "delta.txt should not appear in any duplicate group"
+        );
+    }
+
+    // --- persistent manifest cache ---
+
+    fn build_test_result(dir: &Path) -> ManifestResult {
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+        walk_directory(
+            dir, dir, &mut entries, &mut total_dirs, &mut total_files,
+            false, &mut files_scanned, 0,
+        )
+        .unwrap();
+        let duplicate_groups = build_duplicate_groups(&entries);
+        ManifestResult {
+            selected_folder: dir.to_string_lossy().to_string(),
+            exists: true,
+            is_directory: true,
+            total_directories: total_dirs,
+            total_files: total_files,
+            entries,
+            duplicate_groups,
+        }
+    }
+
+    #[test]
+    fn test_save_and_load_manifest_round_trips() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"hello");
+        let result = build_test_result(dir.path());
+
+        save_manifest(dir.path(), &result);
+
+        let loaded = load_cached_manifest(dir.path())
+            .expect("Cache file should exist after save");
+        assert_eq!(loaded.total_files, result.total_files);
+        assert_eq!(loaded.entries.len(), result.entries.len());
+    }
+
+    #[test]
+    fn test_cache_valid_when_files_unchanged() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"hello");
+        write_file(dir.path(), "b.txt", b"world");
+        let result = build_test_result(dir.path());
+        save_manifest(dir.path(), &result);
+
+        let cached = load_cached_manifest(dir.path()).unwrap();
+        assert!(
+            is_cache_valid(&cached, dir.path()),
+            "Cache should be valid when nothing has changed"
+        );
+    }
+
+    #[test]
+    fn test_cache_invalid_when_file_content_changes() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"original");
+        let result = build_test_result(dir.path());
+        save_manifest(dir.path(), &result);
+
+        // Overwrite with different content (changes size and mtime).
+        write_file(dir.path(), "a.txt", b"completely different content here");
+
+        let cached = load_cached_manifest(dir.path()).unwrap();
+        assert!(
+            !is_cache_valid(&cached, dir.path()),
+            "Cache should be invalid after file content changes"
+        );
+    }
+
+    #[test]
+    fn test_cache_invalid_when_file_added() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"hello");
+        let result = build_test_result(dir.path());
+        save_manifest(dir.path(), &result);
+
+        write_file(dir.path(), "b.txt", b"new file");
+
+        let cached = load_cached_manifest(dir.path()).unwrap();
+        assert!(
+            !is_cache_valid(&cached, dir.path()),
+            "Cache should be invalid after a file is added"
+        );
+    }
+
+    #[test]
+    fn test_cache_invalid_when_file_removed() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"hello");
+        write_file(dir.path(), "b.txt", b"world");
+        let result = build_test_result(dir.path());
+        save_manifest(dir.path(), &result);
+
+        fs::remove_file(dir.path().join("b.txt")).unwrap();
+
+        let cached = load_cached_manifest(dir.path()).unwrap();
+        assert!(
+            !is_cache_valid(&cached, dir.path()),
+            "Cache should be invalid after a file is removed"
+        );
+    }
+
+    #[test]
+    fn test_cache_file_excluded_from_manifest_entries() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"hello");
+        let result = build_test_result(dir.path());
+        save_manifest(dir.path(), &result);
+
+        // Re-scan — the cache file must not appear in entries.
+        let result2 = build_test_result(dir.path());
+        let cache_in_entries = result2
+            .entries
+            .iter()
+            .any(|e| e.relative_path == CACHE_FILENAME);
+        assert!(
+            !cache_in_entries,
+            ".filesteward_manifest.json must not appear as a manifest entry"
+        );
+    }
+
+    #[test]
+    fn test_load_returns_none_for_missing_cache() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            load_cached_manifest(dir.path()).is_none(),
+            "Should return None when no cache file exists"
         );
     }
 }

@@ -77,7 +77,10 @@ class ManifestService {
   ///
   /// Yields [ScanProgress] events as files are hashed, followed by a single
   /// [ScanComplete] when the manifest is ready, or [ScanError] on failure.
-  Stream<ScanEvent> buildManifestStreaming(String selectedFolderPath) async* {
+  Stream<ScanEvent> buildManifestStreaming(
+    String selectedFolderPath, {
+    bool forceRescan = false,
+  }) async* {
     final File? rustBinary = _resolveRustBinary();
     if (rustBinary == null) {
       yield ScanError(
@@ -93,7 +96,11 @@ class ManifestService {
       // Injected runner — used in tests.
       lines = streamingProcessRunner!(
         rustBinary.path,
-        <String>[selectedFolderPath, '--stream-progress'],
+        <String>[
+          selectedFolderPath,
+          '--stream-progress',
+          if (forceRescan) '--force-rescan',
+        ],
       );
     } else {
       // Real process — spawn and stream stdout line by line.
@@ -102,6 +109,7 @@ class ManifestService {
         process = await Process.start(rustBinary.path, <String>[
           selectedFolderPath,
           '--stream-progress',
+          if (forceRescan) '--force-rescan',
         ]);
       } catch (e) {
         yield ScanError('Failed to start Rust process: $e');
