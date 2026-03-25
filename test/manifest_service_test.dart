@@ -202,6 +202,20 @@ void _streamingTests() {
     );
   });
 
+  test('buildManifestStreaming passes --force-rescan flag when requested',
+      () async {
+    final service = ManifestService(
+      rustBinaryResolver: _fakeRustBinary,
+      streamingProcessRunner: _forceRescanCheckRunner,
+    );
+
+    final events = await service
+        .buildManifestStreaming('/tmp/example', forceRescan: true)
+        .toList();
+
+    expect(events.whereType<ScanComplete>(), hasLength(1));
+  });
+
   test('buildManifestStreaming ignores unknown event types gracefully',
       () async {
     final service = ManifestService(
@@ -234,6 +248,16 @@ Stream<String> _streamingSuccessRunner(
       '{"relative_path":"docs/readme.txt","entry_type":"file","size_bytes":512,'
       '"sha256":"abc123","modified_secs":1700000000}'
       ']}';
+}
+
+Stream<String> _forceRescanCheckRunner(
+  String executable,
+  List<String> arguments,
+) async* {
+  expect(arguments, contains('--force-rescan'));
+  yield '{"type":"result","selected_folder":"/tmp/example","exists":true,'
+      '"is_directory":true,"total_directories":0,"total_files":0,'
+      '"duplicate_groups":[],"entries":[]}';
 }
 
 Stream<String> _streamingWithUnknownEventRunner(
