@@ -3,12 +3,14 @@ class ManifestEntry {
   final String entryType;
   final int? sizeBytes;
   final String? sha256;
+  final int? modifiedSecs;
 
   ManifestEntry({
     required this.relativePath,
     required this.entryType,
     required this.sizeBytes,
     this.sha256,
+    this.modifiedSecs,
   });
 
   factory ManifestEntry.fromJson(Map<String, dynamic> json) {
@@ -17,6 +19,7 @@ class ManifestEntry {
       entryType: json['entry_type'] as String? ?? 'other',
       sizeBytes: json['size_bytes'] as int?,
       sha256: json['sha256'] as String?,
+      modifiedSecs: json['modified_secs'] as int?,
     );
   }
 

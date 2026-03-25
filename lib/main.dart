@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'manifest_filter.dart';
 import 'manifest_models.dart';
 import 'manifest_service.dart';
+import 'scan_events.dart';
 
 void main() {
   runApp(const FileStewardApp());
@@ -35,9 +36,13 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   String _statusMessage = 'Choose a folder, then build a recursive manifest.';
   ManifestResult? _manifestResult;
   bool _isRunning = false;
+  double? _scanProgress; // null = idle, 0.0–1.0 = in progress
+  int _filesScanned = 0;
+  int _totalFiles = 0;
   ManifestEntryFilter _entryFilter = ManifestEntryFilter.all;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  DateTime _lastProgressUpdate = DateTime(0);
 
   @override
   void initState() {
@@ -100,34 +105,56 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 
     setState(() {
       _isRunning = true;
+      _scanProgress = 0.0;
+      _filesScanned = 0;
+      _totalFiles = 0;
       _manifestResult = null;
-      _statusMessage = 'Building recursive manifest...';
+      _statusMessage = 'Scanning…';
     });
 
     try {
-      final ManifestResult parsedResult = await _manifestService.buildManifest(
-        _selectedFolderPath!,
-      );
-
-      setState(() {
-        _manifestResult = parsedResult;
-        _entryFilter = ManifestEntryFilter.all;
-        _searchController.clear();
-        _statusMessage = 'Recursive manifest completed.';
-      });
-    } on ManifestServiceException catch (e) {
-      setState(() {
-        _manifestResult = null;
-        _statusMessage = e.message;
-      });
+      await for (final ScanEvent event
+          in _manifestService.buildManifestStreaming(_selectedFolderPath!)) {
+        switch (event) {
+          case ScanProgress(:final filesScanned, :final totalFiles):
+            // Throttle UI rebuilds to ~30fps to avoid widget-tree churn on
+            // large folders emitting thousands of progress events.
+            final now = DateTime.now();
+            if (now.difference(_lastProgressUpdate).inMilliseconds >= 33) {
+              _lastProgressUpdate = now;
+              setState(() {
+                _filesScanned = filesScanned;
+                _totalFiles = totalFiles;
+                _scanProgress =
+                    totalFiles > 0 ? filesScanned / totalFiles : 0.0;
+                _statusMessage = totalFiles > 0
+                    ? 'Scanning… $filesScanned / $totalFiles files'
+                    : 'Scanning…';
+              });
+            }
+          case ScanComplete(:final result):
+            setState(() {
+              _manifestResult = result;
+              _entryFilter = ManifestEntryFilter.all;
+              _searchController.clear();
+              _statusMessage = 'Scan complete.';
+            });
+          case ScanError(:final message):
+            setState(() {
+              _manifestResult = null;
+              _statusMessage = message;
+            });
+        }
+      }
     } catch (e) {
       setState(() {
         _manifestResult = null;
-        _statusMessage = 'Error running Rust:\n\n$e';
+        _statusMessage = 'Error running scan:\n\n$e';
       });
     } finally {
       setState(() {
         _isRunning = false;
+        _scanProgress = null;
       });
     }
   }
@@ -157,6 +184,12 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
     return '${(sizeBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
+  String _formatDate(int modifiedSecs) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(modifiedSecs * 1000);
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-'
+        '${dt.day.toString().padLeft(2, '0')}';
   }
 
   Widget _buildSummaryCard(ManifestResult result) {
@@ -216,9 +249,21 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 4),
-                  ...group.map(
-                    (path) => Padding(
-                      padding: const EdgeInsets.only(top: 2),
+                  ...group.map((path) {
+                    final ManifestEntry? entry = result.entries
+                        .where((e) => e.relativePath == path)
+                        .firstOrNull;
+                    final String sizeLabel = entry?.sizeBytes != null
+                        ? _formatSize(entry!.sizeBytes)
+                        : '';
+                    final String dateLabel = entry?.modifiedSecs != null
+                        ? _formatDate(entry!.modifiedSecs!)
+                        : '';
+                    final String meta = [sizeLabel, dateLabel]
+                        .where((s) => s.isNotEmpty)
+                        .join(' · ');
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 4),
                       child: Row(
                         children: <Widget>[
                           const Icon(
@@ -228,15 +273,28 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
                           ),
                           const SizedBox(width: 6),
                           Expanded(
-                            child: Text(
-                              path,
-                              style: const TextStyle(fontSize: 13),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Text(
+                                  path,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                                if (meta.isNotEmpty)
+                                  Text(
+                                    meta,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                              ],
                             ),
                           ),
                         ],
                       ),
-                    ),
-                  ),
+                    );
+                  }),
                 ],
               ),
             ),
@@ -414,6 +472,14 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             Text(displayedPath, style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 24),
             Text(_statusMessage, style: const TextStyle(fontSize: 16)),
+            if (_isRunning) ...[
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: (_scanProgress != null && _totalFiles > 0)
+                    ? _scanProgress
+                    : null,
+              ),
+            ],
             const SizedBox(height: 24),
             ..._buildResultWidgets(),
           ],
