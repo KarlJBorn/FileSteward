@@ -4,8 +4,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[derive(Serialize)]
 struct ManifestEntry {
@@ -13,6 +14,7 @@ struct ManifestEntry {
     entry_type: String,
     size_bytes: Option<u64>,
     sha256: Option<String>,
+    modified_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -24,6 +26,59 @@ struct ManifestResult {
     total_files: usize,
     entries: Vec<ManifestEntry>,
     duplicate_groups: Vec<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ProgressEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    files_scanned: usize,
+    total_files: usize,
+}
+
+#[derive(Serialize)]
+struct CountingCompleteEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    total_files: usize,
+}
+
+fn emit_progress(files_scanned: usize, total_files: usize) {
+    let event = ProgressEvent {
+        event_type: "progress",
+        files_scanned,
+        total_files,
+    };
+    if let Ok(json) = serde_json::to_string(&event) {
+        println!("{}", json);
+        io::stdout().flush().ok();
+    }
+}
+
+fn count_files(root: &Path) -> usize {
+    let mut count = 0;
+    if let Ok(read_dir) = fs::read_dir(root) {
+        for entry_result in read_dir {
+            if let Ok(entry) = entry_result {
+                let path = entry.path();
+                if path.is_dir() {
+                    count += count_files(&path);
+                } else if path.is_file() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+fn get_modified_secs(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 fn hash_file(path: &Path) -> Option<String> {
@@ -71,6 +126,7 @@ fn main() {
     }
 
     let folder_path = &args[1];
+    let streaming = args.contains(&"--stream-progress".to_string());
     let root_path = Path::new(folder_path);
 
     let exists = root_path.exists();
@@ -79,6 +135,24 @@ fn main() {
     let mut entries: Vec<ManifestEntry> = Vec::new();
     let mut total_directories: usize = 0;
     let mut total_files: usize = 0;
+    let mut files_scanned: usize = 0;
+
+    // Pre-pass: count files and emit counting_complete so Flutter can show
+    // a determinate progress bar from the start.
+    let stream_total = if streaming && exists && is_directory {
+        let total = count_files(root_path);
+        let event = CountingCompleteEvent {
+            event_type: "counting_complete",
+            total_files: total,
+        };
+        if let Ok(json) = serde_json::to_string(&event) {
+            println!("{}", json);
+            io::stdout().flush().ok();
+        }
+        total
+    } else {
+        0
+    };
 
     if exists && is_directory {
         if let Err(err) = walk_directory(
@@ -87,6 +161,9 @@ fn main() {
             &mut entries,
             &mut total_directories,
             &mut total_files,
+            streaming,
+            &mut files_scanned,
+            stream_total,
         ) {
             eprintln!("Failed to build manifest: {}", err);
             std::process::exit(1);
@@ -111,11 +188,38 @@ fn main() {
         entries,
     };
 
-    match serde_json::to_string_pretty(&result) {
-        Ok(json) => println!("{}", json),
-        Err(err) => {
-            eprintln!("Failed to serialize JSON: {}", err);
-            std::process::exit(1);
+    if streaming {
+        // Emit the final manifest as a single compact NDJSON line with a
+        // "type":"result" discriminator so Flutter can distinguish it from
+        // progress events.
+        #[derive(Serialize)]
+        struct ResultEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            #[serde(flatten)]
+            result: ManifestResult,
+        }
+        let event = ResultEvent {
+            event_type: "result",
+            result,
+        };
+        match serde_json::to_string(&event) {
+            Ok(json) => {
+                println!("{}", json);
+                io::stdout().flush().ok();
+            }
+            Err(err) => {
+                eprintln!("Failed to serialize JSON: {}", err);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match serde_json::to_string_pretty(&result) {
+            Ok(json) => println!("{}", json),
+            Err(err) => {
+                eprintln!("Failed to serialize JSON: {}", err);
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -126,6 +230,9 @@ fn walk_directory(
     entries: &mut Vec<ManifestEntry>,
     total_directories: &mut usize,
     total_files: &mut usize,
+    streaming: bool,
+    files_scanned: &mut usize,
+    stream_total: usize,
 ) -> Result<(), String> {
     let read_dir = fs::read_dir(current_path).map_err(|err| err.to_string())?;
 
@@ -140,6 +247,8 @@ fn walk_directory(
             .to_string_lossy()
             .to_string();
 
+        let modified_secs = get_modified_secs(&metadata);
+
         if metadata.is_dir() {
             *total_directories += 1;
 
@@ -148,6 +257,7 @@ fn walk_directory(
                 entry_type: "directory".to_string(),
                 size_bytes: None,
                 sha256: None,
+                modified_secs,
             });
 
             walk_directory(
@@ -156,16 +266,25 @@ fn walk_directory(
                 entries,
                 total_directories,
                 total_files,
+                streaming,
+                files_scanned,
+                stream_total,
             )?;
         } else if metadata.is_file() {
             *total_files += 1;
             let sha256 = hash_file(&entry_path);
+
+            if streaming {
+                *files_scanned += 1;
+                emit_progress(*files_scanned, stream_total);
+            }
 
             entries.push(ManifestEntry {
                 relative_path,
                 entry_type: "file".to_string(),
                 size_bytes: Some(metadata.len()),
                 sha256,
+                modified_secs,
             });
         } else {
             entries.push(ManifestEntry {
@@ -173,6 +292,7 @@ fn walk_directory(
                 entry_type: "other".to_string(),
                 size_bytes: None,
                 sha256: None,
+                modified_secs,
             });
         }
     }
@@ -192,6 +312,21 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content).unwrap();
         path
+    }
+
+    fn make_entry(
+        relative_path: &str,
+        entry_type: &str,
+        size_bytes: Option<u64>,
+        sha256: Option<&str>,
+    ) -> ManifestEntry {
+        ManifestEntry {
+            relative_path: relative_path.into(),
+            entry_type: entry_type.into(),
+            size_bytes,
+            sha256: sha256.map(|s| s.into()),
+            modified_secs: None,
+        }
     }
 
     // --- hash_file ---
@@ -265,6 +400,38 @@ mod tests {
         assert!(result.is_none(), "Expected None for unreadable file");
     }
 
+    // --- get_modified_secs ---
+
+    #[test]
+    fn test_modified_secs_is_some_for_real_file() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(dir.path(), "ts.txt", b"hello");
+        let metadata = fs::metadata(&path).unwrap();
+        let secs = get_modified_secs(&metadata);
+        assert!(secs.is_some(), "Expected Some timestamp for a real file");
+        // Sanity check: timestamp should be after 2020-01-01 (Unix ts 1577836800).
+        assert!(secs.unwrap() > 1_577_836_800);
+    }
+
+    // --- count_files ---
+
+    #[test]
+    fn test_count_files_counts_only_files() {
+        let dir = TempDir::new().unwrap();
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        write_file(dir.path(), "a.txt", b"a");
+        write_file(dir.path(), "b.txt", b"b");
+        write_file(&subdir, "c.txt", b"c");
+        assert_eq!(count_files(dir.path()), 3);
+    }
+
+    #[test]
+    fn test_count_files_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(count_files(dir.path()), 0);
+    }
+
     // --- build_duplicate_groups ---
 
     #[test]
@@ -275,18 +442,8 @@ mod tests {
     #[test]
     fn test_duplicate_groups_no_duplicates() {
         let entries = vec![
-            ManifestEntry {
-                relative_path: "a.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("aaaa".into()),
-            },
-            ManifestEntry {
-                relative_path: "b.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("bbbb".into()),
-            },
+            make_entry("a.txt", "file", Some(5), Some("aaaa")),
+            make_entry("b.txt", "file", Some(5), Some("bbbb")),
         ];
         assert!(build_duplicate_groups(&entries).is_empty());
     }
@@ -294,24 +451,9 @@ mod tests {
     #[test]
     fn test_duplicate_groups_detects_pair() {
         let entries = vec![
-            ManifestEntry {
-                relative_path: "a.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
-            ManifestEntry {
-                relative_path: "b.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
-            ManifestEntry {
-                relative_path: "c.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("different".into()),
-            },
+            make_entry("a.txt", "file", Some(5), Some("same")),
+            make_entry("b.txt", "file", Some(5), Some("same")),
+            make_entry("c.txt", "file", Some(5), Some("different")),
         ];
         let groups = build_duplicate_groups(&entries);
         assert_eq!(groups.len(), 1);
@@ -321,24 +463,9 @@ mod tests {
     #[test]
     fn test_duplicate_groups_detects_three_way_group() {
         let entries = vec![
-            ManifestEntry {
-                relative_path: "a.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
-            ManifestEntry {
-                relative_path: "b.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
-            ManifestEntry {
-                relative_path: "c.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
+            make_entry("a.txt", "file", Some(5), Some("same")),
+            make_entry("b.txt", "file", Some(5), Some("same")),
+            make_entry("c.txt", "file", Some(5), Some("same")),
         ];
         let groups = build_duplicate_groups(&entries);
         assert_eq!(groups.len(), 1);
@@ -348,30 +475,10 @@ mod tests {
     #[test]
     fn test_duplicate_groups_two_independent_groups() {
         let entries = vec![
-            ManifestEntry {
-                relative_path: "a.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("hash_x".into()),
-            },
-            ManifestEntry {
-                relative_path: "b.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("hash_x".into()),
-            },
-            ManifestEntry {
-                relative_path: "c.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("hash_y".into()),
-            },
-            ManifestEntry {
-                relative_path: "d.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("hash_y".into()),
-            },
+            make_entry("a.txt", "file", Some(5), Some("hash_x")),
+            make_entry("b.txt", "file", Some(5), Some("hash_x")),
+            make_entry("c.txt", "file", Some(5), Some("hash_y")),
+            make_entry("d.txt", "file", Some(5), Some("hash_y")),
         ];
         let groups = build_duplicate_groups(&entries);
         assert_eq!(groups.len(), 2);
@@ -382,24 +489,9 @@ mod tests {
     #[test]
     fn test_duplicate_groups_ignores_directories() {
         let entries = vec![
-            ManifestEntry {
-                relative_path: "dir_a".into(),
-                entry_type: "directory".into(),
-                size_bytes: None,
-                sha256: None,
-            },
-            ManifestEntry {
-                relative_path: "a.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
-            ManifestEntry {
-                relative_path: "b.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
+            make_entry("dir_a", "directory", None, None),
+            make_entry("a.txt", "file", Some(5), Some("same")),
+            make_entry("b.txt", "file", Some(5), Some("same")),
         ];
         let groups = build_duplicate_groups(&entries);
         assert_eq!(groups.len(), 1);
@@ -410,18 +502,8 @@ mod tests {
     fn test_duplicate_groups_skips_file_with_no_hash() {
         // A file whose hash is None (e.g. unreadable) must not crash or pollute groups.
         let entries = vec![
-            ManifestEntry {
-                relative_path: "a.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: Some("same".into()),
-            },
-            ManifestEntry {
-                relative_path: "b.txt".into(),
-                entry_type: "file".into(),
-                size_bytes: Some(5),
-                sha256: None,
-            },
+            make_entry("a.txt", "file", Some(5), Some("same")),
+            make_entry("b.txt", "file", Some(5), None),
         ];
         assert!(build_duplicate_groups(&entries).is_empty());
     }
@@ -441,6 +523,7 @@ mod tests {
         let mut entries = Vec::new();
         let mut total_dirs = 0;
         let mut total_files = 0;
+        let mut files_scanned = 0;
 
         walk_directory(
             &corpus_path,
@@ -448,11 +531,27 @@ mod tests {
             &mut entries,
             &mut total_dirs,
             &mut total_files,
+            false,
+            &mut files_scanned,
+            0,
         )
         .unwrap();
 
         assert_eq!(total_files, 4, "Fixture should have exactly 4 files");
         assert_eq!(total_dirs, 1, "Fixture should have exactly 1 subdirectory");
+
+        // Every file entry should carry a modified_secs timestamp.
+        let file_entries: Vec<&ManifestEntry> = entries
+            .iter()
+            .filter(|e| e.entry_type == "file")
+            .collect();
+        for entry in &file_entries {
+            assert!(
+                entry.modified_secs.is_some(),
+                "Expected modified_secs on file entry '{}'",
+                entry.relative_path
+            );
+        }
 
         let groups = build_duplicate_groups(&entries);
         assert_eq!(groups.len(), 1, "Expected exactly one duplicate group");
