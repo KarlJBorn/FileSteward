@@ -143,6 +143,5 @@ When hashing is added, `ManifestEntry` gains `sha256: Option<String>` and the ou
 | `lib/manifest_service.dart` | Spawns Rust binary, parses stdout JSON |
 | `lib/manifest_models.dart` | `ManifestEntry`, `ManifestResult` with JSON deserialization |
 | `lib/manifest_filter.dart` | Filter by type (all/dirs/files) and search query |
-| `lib/agent_board_status_writer.dart` | AgentBoard status/event writer (legacy dev tool) |
 | `rust_core/src/main.rs` | Recursive directory walker, JSON serializer |
 | `test_corpus/` | Fixture folders used in tests |
