@@ -460,6 +460,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 
   Widget _buildSummaryCard(ManifestResult result) {
     final int totalEntries = result.entries.length;
+    final int duplicateGroupCount = result.duplicateGroups.length;
 
     return Card(
       child: Padding(
@@ -475,9 +476,72 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               value: result.totalDirectories.toString(),
             ),
             _SummaryItem(label: 'Files', value: result.totalFiles.toString()),
+            _SummaryItem(
+              label: 'Dup. Groups',
+              value: duplicateGroupCount.toString(),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildDuplicateGroups(ManifestResult result) {
+    if (result.duplicateGroups.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const SizedBox(height: 16),
+        Text(
+          'Duplicate Groups (${result.duplicateGroups.length})',
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        ...result.duplicateGroups.asMap().entries.map((entry) {
+          final int index = entry.key;
+          final List<String> group = entry.value;
+          return Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'Group ${index + 1} — ${group.length} identical files',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  ...group.map(
+                    (path) => Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Row(
+                        children: <Widget>[
+                          const Icon(
+                            Icons.content_copy,
+                            size: 14,
+                            color: Colors.orange,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              path,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+      ],
     );
   }
 
@@ -626,6 +690,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         )
       else
         ...visibleEntries.map(_buildManifestTile),
+      _buildDuplicateGroups(manifestResult),
     ];
   }
 
