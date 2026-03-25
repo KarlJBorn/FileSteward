@@ -1,108 +1,63 @@
 # FileSteward
 
-FileSteward is a macOS-first Flutter + Rust prototype for safely inspecting a
-folder tree and building a deterministic manifest for human review.
+I have a pile of backup drives accumulated over the years — external hard drives, old Time Machine volumes, USB sticks — each a partial snapshot of files from different points in time. Every tool I found was either a bulk-delete utility (too dangerous) or a simple duplicate finder (too narrow). None of them helped me reason carefully about what to keep, what was redundant, and what was safe to remove.
 
-## Current Prototype
+So I built FileSteward.
 
-The app can:
+## What it does
 
-- let the user choose a folder in Flutter
-- invoke a Rust executable with that folder path
-- build a recursive manifest in Rust
-- return JSON to Flutter
-- display counts and entries in the desktop UI
+FileSteward is a macOS desktop app that helps you rationalize consolidated backup disks. It finds duplicate files, classifies what's there, and gives you the information you need to make confident decisions — without ever taking destructive action without your explicit approval.
 
-The current prototype does not:
+The design principle: **analyze and recommend, never delete by default.**
 
-- modify files
-- hash files
-- use AI
-- package the Rust executable into the app bundle
+## Why I built it this way
+
+This project is also a learning exercise. I spent years as a software development manager, working with and leading engineering teams. I wanted to experience firsthand what AI-assisted development feels like from the builder's seat — not just as someone reviewing it.
+
+I'm using Claude as a development partner, applying the same software engineering practices I've always believed in: clear architecture, tested code, incremental iteration, and a clean Git history. The goal is to build something genuinely useful while developing real competence as a developer.
+
+## Current state (Iteration 1)
+
+- Recursively scans any folder and builds a full file manifest
+- SHA-256 hashes every file and identifies exact duplicates
+- Groups duplicate files and surfaces them clearly in the UI
+- Exports results as structured JSON
+- 16 Rust unit + integration tests; 8 Flutter tests; CI on every PR
 
 ## Architecture
 
-- Flutter UI in [lib/main.dart](lib/main.dart)
-- AgentBoard status output in [lib/agent_board_status_writer.dart](lib/agent_board_status_writer.dart)
-- Rust manifest builder in [rust_core/src/main.rs](rust_core/src/main.rs)
-- JSON over stdout/stderr as the integration boundary
+**Stack:** Flutter/Dart (UI) + Rust (file engine), communicating over JSON on stdout.
 
-This keeps the development flow simple and easy to inspect while the project is
-still in the learning/prototype phase.
-
-## macOS Development Flow
-
-1. Build the Rust binary:
-
-   ```sh
-   make rust-build
-   ```
-
-2. Run the Flutter macOS app:
-
-   ```sh
-   make flutter-run
-   ```
-
-   To monitor FileSteward in AgentBoard at the same time:
-
-   ```sh
-   FILESTEWARD_AGENT_BOARD_DIR=~/Development/projects/FileSteward/dev_status make flutter-run
-   ```
-
-3. In the app, choose a folder and click `Build Manifest`.
-
-The Flutter app looks for the Rust executable in:
-
-- `FILESTEWARD_RUST_BINARY` if set
-- `rust_core/target/debug/rust_core`
-- a small set of nearby relative fallback paths used during local development
-
-## AgentBoard Integration
-
-Use a dedicated development status source for AgentBoard, separate from FileSteward runtime app behavior:
-
-```sh
-~/Development/projects/FileSteward/dev_status
+```
+User picks folder → Flutter spawns Rust binary → Rust walks + hashes → JSON → Flutter renders
 ```
 
-That folder contains:
+- [`lib/main.dart`](lib/main.dart) — UI and app state
+- [`lib/manifest_models.dart`](lib/manifest_models.dart) — data models and JSON parsing
+- [`lib/manifest_service.dart`](lib/manifest_service.dart) — spawns the Rust binary, parses output
+- [`rust_core/src/main.rs`](rust_core/src/main.rs) — recursive walker, SHA-256 hashing, duplicate detection
 
-- `current_run.json`
-- `work_log.jsonl`
-- `commands.jsonl`
-- `command_receipts.jsonl`
+## Running it
 
-Development agents can write those files directly, and AgentBoard can point at that folder while FileSteward development is in progress.
-
-Supported AgentBoard actions:
-
-- `Approve`
-- `Retry`
-- `Request Checkpoint`
-
-To make those actions update `dev_status/`, run the local controller in a separate terminal:
+**Prerequisites:** Flutter, Rust/Cargo, macOS.
 
 ```sh
-make dev-status-controller
+# 1. Build the Rust engine (required before running Flutter)
+make rust-build
+
+# 2. Run the app
+make flutter-run
+
+# 3. Run all tests
+make check
 ```
 
-## Checks
+## Roadmap
 
-Run the current automated check with:
-
-```sh
-make test
-```
-
-GitHub Actions now runs the same Rust and Flutter test commands on `push` and
-`pull_request` using [ci.yml](.github/workflows/ci.yml).
-
-## Notes
-
-- Debug macOS entitlements currently disable the app sandbox to keep the
-  prototype workflow simple during development.
-- Release entitlements are more restrictive and only allow read-only access to
-  user-selected files.
-- During development, FileSteward now writes AgentBoard-compatible snapshot and
-  event files to `agent_board_status/` by default.
+| Iteration | Focus |
+|-----------|-------|
+| ✅ 1 | CLI engine, manifest, SHA-256 hashing, duplicate detection |
+| 2 | Full desktop UI, scan progress, quarantine workflow, export |
+| 3 | Rules engine, similarity detection, undo/audit log |
+| 4 | iPad/iPhone review client |
+| 5 | Performance tuning, visual topology, recommendation engine |
