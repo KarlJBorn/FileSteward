@@ -184,33 +184,39 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   int get _crossDirDuplicateCount {
     final result = _manifestResult;
     if (result == null) return 0;
-    return result.duplicateGroups.where((g) {
-      final dirs = g.map((p) {
-        final idx = p.lastIndexOf('/');
-        return idx < 0 ? '' : p.substring(0, idx);
+    int count = 0;
+    for (final group in result.duplicateGroups) {
+      final dirs = group.map((path) {
+        final parts = path.split('/');
+        return parts.length > 1
+            ? parts.sublist(0, parts.length - 1).join('/')
+            : '';
       }).toSet();
-      return dirs.length > 1;
-    }).length;
+      if (dirs.length > 1) count += group.length;
+    }
+    return count;
   }
 
   int get _potentialSavingsBytes {
     final result = _manifestResult;
     if (result == null) return 0;
-    int total = 0;
+    final sizeByPath = <String, int>{
+      for (final entry in result.entries)
+        if (entry.sizeBytes != null) entry.relativePath: entry.sizeBytes!,
+    };
+    int savings = 0;
     for (final group in result.duplicateGroups) {
-      for (final path in group.skip(1)) {
-        final entry = result.entries
-            .where((e) => e.relativePath == path)
-            .firstOrNull;
-        total += entry?.sizeBytes ?? 0;
-      }
+      if (group.length < 2) continue;
+      final fileSize = sizeByPath[group.first] ?? 0;
+      savings += fileSize * (group.length - 1);
     }
-    return total;
+    return savings;
   }
 
   // ---------------------------------------------------------------------------
   // Formatting helpers
   // ---------------------------------------------------------------------------
+
 
   IconData _iconForEntryType(String entryType) {
     switch (entryType) {
@@ -319,28 +325,27 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             ),
           ),
           if (hasScan && _potentialSavingsBytes > 0)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.green[50],
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.green[200]!),
-                ),
-                child: Row(
-                  children: <Widget>[
-                    Icon(Icons.savings, color: Colors.green[700]),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Potential savings: ${_formatSize(_potentialSavingsBytes)}',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.green[700],
-                      ),
+            Container(
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.green[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green[200]!),
+              ),
+              child: Row(
+                children: <Widget>[
+                  Icon(Icons.savings_outlined,
+                      color: Colors.green[700], size: 18),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Potential savings: ${_formatSize(_potentialSavingsBytes)}',
+                    style: TextStyle(
+                      color: Colors.green[800],
+                      fontWeight: FontWeight.w600,
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           if (_sourcesExpanded)
