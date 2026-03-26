@@ -833,7 +833,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Select the file types to include in the full scan.',
+              'Select the file types to include in all analysis passes.',
               style: TextStyle(fontSize: 13, color: Colors.grey[600]),
             ),
             const SizedBox(height: 12),
