@@ -86,7 +86,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       final result = await _manifestService.buildInventory(folderPath);
       setState(() {
         _inventoryResult = result;
-        _selectedExtensions = result.extensions.map((s) => s.extension).toSet();
+        _selectedExtensions = {};
       });
     } on ManifestServiceException catch (e) {
       if (mounted) {
@@ -426,7 +426,44 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               'Select the file types to include in all analysis passes.',
               style: TextStyle(fontSize: 13, color: Colors.grey[600]),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
+            if (!hasScan)
+              Row(
+                children: <Widget>[
+                  SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: Checkbox(
+                      tristate: true,
+                      value: _selectedExtensions.isEmpty
+                          ? false
+                          : _selectedExtensions.length ==
+                                  inventory.extensions.length
+                              ? true
+                              : null,
+                      onChanged: (_) {
+                        setState(() {
+                          if (_selectedExtensions.length ==
+                              inventory.extensions.length) {
+                            _selectedExtensions = {};
+                          } else {
+                            _selectedExtensions = inventory.extensions
+                                .map((s) => s.extension)
+                                .toSet();
+                          }
+                        });
+                      },
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Check All',
+                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                ],
+              ),
+            const Divider(height: 16),
             ...visibleExtensions.map((stat) {
               final label =
                   stat.extension.isEmpty ? '(no extension)' : stat.extension;
