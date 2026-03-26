@@ -300,23 +300,21 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
                   label: 'Size',
                   value: _formatSize(_totalInventoryBytes),
                 ),
-                if (hasScan) ...<Widget>[
-                  _SummaryItem(
-                    label: 'Unique',
-                    value: _uniqueFileCount.toString(),
-                    color: Colors.green[700],
-                  ),
-                  _SummaryItem(
-                    label: 'Duplicates',
-                    value: _duplicateFileCount.toString(),
-                    color: Colors.orange[700],
-                  ),
-                  _SummaryItem(
-                    label: 'Cross-Dir Dups',
-                    value: _crossDirDuplicateCount.toString(),
-                    color: Colors.deepOrange[700],
-                  ),
-                ],
+                _SummaryItem(
+                  label: 'Unique',
+                  value: hasScan ? _uniqueFileCount.toString() : '—',
+                  color: hasScan ? Colors.green[700] : Colors.grey[400],
+                ),
+                _SummaryItem(
+                  label: 'Duplicates',
+                  value: hasScan ? _duplicateFileCount.toString() : '—',
+                  color: hasScan ? Colors.orange[700] : Colors.grey[400],
+                ),
+                _SummaryItem(
+                  label: 'Cross-Dir Dups',
+                  value: hasScan ? _crossDirDuplicateCount.toString() : '—',
+                  color: hasScan ? Colors.deepOrange[700] : Colors.grey[400],
+                ),
               ],
             ),
           ),
