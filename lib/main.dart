@@ -1,12 +1,11 @@
+import 'dart:async';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
-import 'folder_scan_state.dart';
-import 'manifest_filter.dart';
 import 'manifest_models.dart';
 import 'manifest_service.dart';
 import 'scan_events.dart';
-import 'unified_manifest.dart';
 
 void main() {
   runApp(const FileStewardApp());
@@ -35,36 +34,23 @@ class FileStewardHomePage extends StatefulWidget {
 class _FileStewardHomePageState extends State<FileStewardHomePage> {
   final ManifestService _manifestService = const ManifestService();
 
-  List<FolderScanState> _folders = [];
-  UnifiedManifest? _unifiedManifest;
-  bool _isScanning = false;
+  String? _selectedFolderPath;
+
+  // Inventory pass (fast, auto-runs after folder selection)
+  InventoryResult? _inventoryResult;
+  bool _isInventoryRunning = false;
+  bool _sourcesExpanded = false;
+  Set<String> _selectedExtensions = {};
+
+  // Full manifest (streaming hashing pass)
+  ManifestResult? _manifestResult;
+  bool _isRunning = false;
+  double _scanProgress = 0.0;
+  int _filesScanned = 0;
+  int _totalScanFiles = 0;
   bool _forceRescan = false;
 
-  ManifestEntryFilter _entryFilter = ManifestEntryFilter.all;
-  final TextEditingController _searchController = TextEditingController();
-  String _searchQuery = '';
-
   DateTime _lastProgressUpdate = DateTime(0);
-
-  @override
-  void initState() {
-    super.initState();
-    _searchController.addListener(_handleSearchChanged);
-  }
-
-  @override
-  void dispose() {
-    _searchController
-      ..removeListener(_handleSearchChanged)
-      ..dispose();
-    super.dispose();
-  }
-
-  void _handleSearchChanged() {
-    final nextQuery = _searchController.text;
-    if (nextQuery == _searchQuery) return;
-    setState(() => _searchQuery = nextQuery);
-  }
 
   // ---------------------------------------------------------------------------
   // Folder management
@@ -75,95 +61,149 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       final String? directoryPath = await getDirectoryPath();
       if (directoryPath == null || directoryPath.isEmpty) return;
 
-      // Ignore if already in the list.
-      if (_folders.any((f) => f.folderPath == directoryPath)) return;
-
       setState(() {
-        _folders = [..._folders, FolderScanState(folderPath: directoryPath)];
-        _unifiedManifest = null;
+        _selectedFolderPath = directoryPath;
+        _inventoryResult = null;
+        _selectedExtensions = {};
+        _manifestResult = null;
       });
+      unawaited(_runInventory(directoryPath));
     } catch (e) {
       // Ignore cancellation errors.
     }
   }
 
-  void _removeFolder(int index) {
+  // ---------------------------------------------------------------------------
+  // Inventory pass
+  // ---------------------------------------------------------------------------
+
+  Future<void> _runInventory(String folderPath) async {
     setState(() {
-      _folders = [..._folders]..removeAt(index);
-      _unifiedManifest = null;
+      _isInventoryRunning = true;
+    });
+
+    try {
+      final result = await _manifestService.buildInventory(folderPath);
+      setState(() {
+        _inventoryResult = result;
+        _selectedExtensions = result.extensions.map((s) => s.extension).toSet();
+      });
+    } on ManifestServiceException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error running inventory:\n\n$e')),
+        );
+      }
+    } finally {
+      setState(() {
+        _isInventoryRunning = false;
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Manifest scan (streaming hashing pass)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _buildManifest() async {
+    final folderPath = _selectedFolderPath;
+    if (folderPath == null) return;
+
+    setState(() {
+      _isRunning = true;
+      _manifestResult = null;
+      _scanProgress = 0.0;
+      _filesScanned = 0;
+      _totalScanFiles = 0;
+    });
+
+    await for (final ScanEvent event in _manifestService.buildManifestStreaming(
+      folderPath,
+      forceRescan: _forceRescan,
+    )) {
+      switch (event) {
+        case ScanProgress(:final filesScanned, :final totalFiles):
+          final now = DateTime.now();
+          if (now.difference(_lastProgressUpdate).inMilliseconds >= 33) {
+            _lastProgressUpdate = now;
+            setState(() {
+              _filesScanned = filesScanned;
+              _totalScanFiles = totalFiles;
+              _scanProgress =
+                  totalFiles > 0 ? filesScanned / totalFiles : 0.0;
+            });
+          }
+        case ScanComplete(:final result):
+          setState(() {
+            _manifestResult = result;
+          });
+        case ScanError(:final message):
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(message)),
+            );
+          }
+      }
+    }
+
+    setState(() {
+      _isRunning = false;
     });
   }
 
   // ---------------------------------------------------------------------------
-  // Scanning
+  // Computed getters
   // ---------------------------------------------------------------------------
 
-  Future<void> _scanAll() async {
-    if (_folders.isEmpty) return;
+  int get _totalInventoryBytes =>
+      _inventoryResult?.extensions.fold<int>(0, (s, e) => s + e.totalBytes) ??
+      0;
 
-    setState(() {
-      _isScanning = true;
-      _unifiedManifest = null;
-      // Reset all folder states to pending.
-      _folders = _folders
-          .map((f) => FolderScanState(folderPath: f.folderPath))
-          .toList();
-    });
+  int get _uniqueFileCount {
+    final result = _manifestResult;
+    if (result == null) return 0;
+    final duplicated =
+        result.duplicateGroups.expand((g) => g).toSet().length;
+    return result.totalFiles - duplicated;
+  }
 
-    for (int i = 0; i < _folders.length; i++) {
-      // Mark this folder as scanning.
-      setState(() {
-        _folders[i] = _folders[i].copyWith(scanProgress: 0.0);
-      });
+  int get _duplicateFileCount {
+    final result = _manifestResult;
+    if (result == null) return 0;
+    return result.duplicateGroups.expand((g) => g).toSet().length;
+  }
 
-      await for (final ScanEvent event in _manifestService
-          .buildManifestStreaming(
-        _folders[i].folderPath,
-        forceRescan: _forceRescan,
-      )) {
-        switch (event) {
-          case ScanProgress(:final filesScanned, :final totalFiles):
-            final now = DateTime.now();
-            if (now.difference(_lastProgressUpdate).inMilliseconds >= 33) {
-              _lastProgressUpdate = now;
-              setState(() {
-                _folders[i] = _folders[i].copyWith(
-                  scanProgress:
-                      totalFiles > 0 ? filesScanned / totalFiles : 0.0,
-                  filesScanned: filesScanned,
-                  totalFiles: totalFiles,
-                );
-              });
-            }
-          case ScanComplete(:final result):
-            setState(() {
-              _folders[i] = _folders[i].copyWith(
-                result: result,
-                clearScanProgress: true,
-              );
-            });
-          case ScanError(:final message):
-            setState(() {
-              _folders[i] = _folders[i].copyWith(
-                errorMessage: message,
-                clearScanProgress: true,
-              );
-            });
-        }
+  int get _crossDirDuplicateCount {
+    final result = _manifestResult;
+    if (result == null) return 0;
+    return result.duplicateGroups.where((g) {
+      final dirs = g.map((p) {
+        final idx = p.lastIndexOf('/');
+        return idx < 0 ? '' : p.substring(0, idx);
+      }).toSet();
+      return dirs.length > 1;
+    }).length;
+  }
+
+  int get _potentialSavingsBytes {
+    final result = _manifestResult;
+    if (result == null) return 0;
+    int total = 0;
+    for (final group in result.duplicateGroups) {
+      for (final path in group.skip(1)) {
+        final entry = result.entries
+            .where((e) => e.relativePath == path)
+            .firstOrNull;
+        total += entry?.sizeBytes ?? 0;
       }
     }
-
-    // Compute unified manifest from all completed scans.
-    final completedResults = _folders
-        .where((f) => f.result != null)
-        .map((f) => f.result!)
-        .toList();
-
-    setState(() {
-      _unifiedManifest =
-          completedResults.isNotEmpty ? UnifiedManifest.from(completedResults) : null;
-      _isScanning = false;
-    });
+    return total;
   }
 
   // ---------------------------------------------------------------------------
@@ -205,129 +245,136 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   }
 
   // ---------------------------------------------------------------------------
-  // UI builders — folder list
+  // UI builders — Scan Summary
   // ---------------------------------------------------------------------------
 
-  Widget _buildFolderList() {
-    if (_folders.isEmpty) {
-      return const Text(
-        'No folders added yet. Add one or more source folders to scan.',
-        style: TextStyle(fontSize: 15, color: Colors.grey),
-      );
-    }
+  Widget _buildScanSummaryCard() {
+    final inventory = _inventoryResult;
+    if (inventory == null) return const SizedBox.shrink();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: _folders.asMap().entries.map((entry) {
-        final int index = entry.key;
-        final FolderScanState folder = entry.value;
-        return _buildFolderTile(index, folder);
-      }).toList(),
-    );
-  }
-
-  Widget _buildFolderTile(int index, FolderScanState folder) {
-    final Widget statusIcon;
-    if (folder.isScanning) {
-      statusIcon = const SizedBox(
-        width: 18,
-        height: 18,
-        child: CircularProgressIndicator(strokeWidth: 2),
-      );
-    } else if (folder.isComplete) {
-      statusIcon = const Icon(Icons.check_circle, color: Colors.green, size: 18);
-    } else if (folder.hasError) {
-      statusIcon = const Icon(Icons.error_outline, color: Colors.red, size: 18);
-    } else {
-      statusIcon = const Icon(Icons.radio_button_unchecked, size: 18, color: Colors.grey);
-    }
-
-    String subtitle = folder.folderPath;
-    if (folder.isScanning && folder.totalFiles > 0) {
-      subtitle = 'Scanning… ${folder.filesScanned} / ${folder.totalFiles} files';
-    } else if (folder.isComplete) {
-      final r = folder.result!;
-      subtitle = '${r.totalFiles} files · ${r.totalDirectories} folders';
-    } else if (folder.hasError) {
-      subtitle = folder.errorMessage ?? 'Error';
-    }
+    final hasScan = _manifestResult != null;
 
     return Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          InkWell(
+            onTap: () =>
+                setState(() => _sourcesExpanded = !_sourcesExpanded),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+              child: Row(
+                children: <Widget>[
+                  const Text(
+                    'Scan Summary',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    _sourcesExpanded
+                        ? 'Collapse ▴'
+                        : 'Expand for Source Details ▾',
+                    style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Wrap(
+              spacing: 24,
+              runSpacing: 16,
+              alignment: WrapAlignment.spaceEvenly,
               children: <Widget>[
-                statusIcon,
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _shortPath(folder.folderPath),
-                    style: const TextStyle(fontWeight: FontWeight.w500),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                _SummaryItem(
+                  label: 'Files',
+                  value: inventory.totalFiles.toString(),
                 ),
-                if (!_isScanning)
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 16),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    tooltip: 'Remove folder',
-                    onPressed: () => _removeFolder(index),
+                _SummaryItem(
+                  label: 'Size',
+                  value: _formatSize(_totalInventoryBytes),
+                ),
+                if (hasScan) ...<Widget>[
+                  _SummaryItem(
+                    label: 'Unique',
+                    value: _uniqueFileCount.toString(),
+                    color: Colors.green[700],
                   ),
+                  _SummaryItem(
+                    label: 'Duplicates',
+                    value: _duplicateFileCount.toString(),
+                    color: Colors.orange[700],
+                  ),
+                  _SummaryItem(
+                    label: 'Cross-Dir Dups',
+                    value: _crossDirDuplicateCount.toString(),
+                    color: Colors.deepOrange[700],
+                  ),
+                ],
               ],
             ),
-            const SizedBox(height: 2),
-            Text(subtitle, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-            if (folder.isScanning)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: LinearProgressIndicator(
-                  value: folder.totalFiles > 0 ? folder.scanProgress : null,
+          ),
+          if (hasScan && _potentialSavingsBytes > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green[50],
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green[200]!),
+                ),
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.savings, color: Colors.green[700]),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Potential savings: ${_formatSize(_potentialSavingsBytes)}',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green[700],
+                      ),
+                    ),
+                  ],
                 ),
               ),
-          ],
-        ),
+            ),
+          if (_sourcesExpanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: _buildSourceDetailCard(inventory),
+            ),
+        ],
       ),
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // UI builders — unified results
-  // ---------------------------------------------------------------------------
-
-  Widget _buildUnifiedSummaryCard(UnifiedManifest manifest) {
+  Widget _buildSourceDetailCard(InventoryResult inventory) {
     return Card(
+      color: Colors.grey[50],
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: Colors.grey[300]!),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Wrap(
           spacing: 24,
-          runSpacing: 16,
+          runSpacing: 12,
           alignment: WrapAlignment.spaceEvenly,
           children: <Widget>[
             _SummaryItem(
-              label: 'Sources',
-              value: manifest.sources.length.toString(),
-            ),
-            _SummaryItem(
               label: 'Files',
-              value: manifest.totalFiles.toString(),
+              value: inventory.totalFiles.toString(),
             ),
             _SummaryItem(
-              label: 'Folders',
-              value: manifest.totalDirectories.toString(),
-            ),
-            _SummaryItem(
-              label: 'Cross-Source Dups',
-              value: manifest.crossSourceGroupCount.toString(),
-              highlight: manifest.crossSourceGroupCount > 0,
-            ),
-            _SummaryItem(
-              label: 'Within-Source Dups',
-              value: manifest.withinSourceGroupCount.toString(),
+              label: 'Size',
+              value: _formatSize(_totalInventoryBytes),
             ),
           ],
         ),
@@ -335,274 +382,134 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     );
   }
 
-  Widget _buildCrossSourceGroups(UnifiedManifest manifest) {
-    if (manifest.crossSourceGroups.isEmpty) return const SizedBox.shrink();
+  // ---------------------------------------------------------------------------
+  // UI builders — Scan Scope
+  // ---------------------------------------------------------------------------
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        const SizedBox(height: 16),
-        Row(
-          children: <Widget>[
-            const Icon(Icons.compare_arrows, color: Colors.deepOrange),
-            const SizedBox(width: 8),
-            Text(
-              'Cross-Source Duplicates (${manifest.crossSourceGroups.length})',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        const Text(
-          'These files appear identically in more than one source folder.',
-          style: TextStyle(fontSize: 13, color: Colors.grey),
-        ),
-        const SizedBox(height: 8),
-        ...manifest.crossSourceGroups.asMap().entries.map((entry) {
-          final int index = entry.key;
-          final CrossSourceGroup group = entry.value;
-          return _buildCrossSourceGroupCard(index, group);
-        }),
-      ],
+  Widget _buildScanScopeCard() {
+    final inventory = _inventoryResult;
+    if (inventory == null || inventory.extensions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final hasScan = _manifestResult != null;
+    final maxCount = inventory.extensions.fold<int>(
+      0,
+      (m, s) => s.count > m ? s.count : m,
     );
-  }
 
-  Widget _buildCrossSourceGroupCard(int index, CrossSourceGroup group) {
+    final visibleExtensions = hasScan
+        ? inventory.extensions
+            .where((s) => _selectedExtensions.contains(s.extension))
+            .toList()
+        : inventory.extensions;
+    final excludedCount =
+        inventory.extensions.length - visibleExtensions.length;
+
     return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      color: Colors.deepOrange.shade50,
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text(
-              'Group ${index + 1} — ${group.members.length} identical copies across sources',
-              style: const TextStyle(fontWeight: FontWeight.bold),
+            const Text(
+              'Scan Scope',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 4),
-            ...group.members.map((member) {
-              final sizeLabel = _formatSize(member.entry.sizeBytes);
-              final dateLabel = member.entry.modifiedSecs != null
-                  ? _formatDate(member.entry.modifiedSecs!)
-                  : '';
-              final meta = [sizeLabel, dateLabel]
-                  .where((s) => s.isNotEmpty)
-                  .join(' · ');
+            Text(
+              'Select the file types to include in all analysis passes.',
+              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 12),
+            ...visibleExtensions.map((stat) {
+              final label =
+                  stat.extension.isEmpty ? '(no extension)' : stat.extension;
+              final isSelected = _selectedExtensions.contains(stat.extension);
               return Padding(
-                padding: const EdgeInsets.only(top: 4),
+                padding: const EdgeInsets.symmetric(vertical: 3),
                 child: Row(
                   children: <Widget>[
-                    const Icon(Icons.content_copy, size: 14, color: Colors.deepOrange),
-                    const SizedBox(width: 6),
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: Checkbox(
+                        value: isSelected,
+                        onChanged: hasScan
+                            ? null
+                            : (checked) {
+                                setState(() {
+                                  if (checked == true) {
+                                    _selectedExtensions.add(stat.extension);
+                                  } else {
+                                    _selectedExtensions
+                                        .remove(stat.extension);
+                                  }
+                                });
+                              },
+                        materialTapTargetSize:
+                            MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 72,
+                      child: Text(
+                        label,
+                        style: const TextStyle(fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(
-                            member.absolutePath,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                          if (meta.isNotEmpty)
-                            Text(
-                              meta,
-                              style: const TextStyle(
-                                fontSize: 11, color: Colors.grey),
-                            ),
-                        ],
+                      child: LinearProgressIndicator(
+                        value: maxCount > 0 ? stat.count / maxCount : 0,
+                        backgroundColor: Colors.grey[200],
+                        color: isSelected ? Colors.blue : Colors.grey[400],
+                        minHeight: 6,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${stat.count}  ${_formatSize(stat.totalBytes)}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[700],
                       ),
                     ),
                   ],
                 ),
               );
             }),
+            if (hasScan && excludedCount > 0) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                '$excludedCount excluded type${excludedCount > 1 ? 's' : ''} hidden',
+                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
 
-  Widget _buildWithinSourceGroups(UnifiedManifest manifest) {
-    final allGroups = <MapEntry<String, List<String>>>[];
-    for (final source in manifest.sources) {
-      for (final group in source.duplicateGroups) {
-        allGroups.add(MapEntry(source.selectedFolder, group));
-      }
-    }
-
-    if (allGroups.isEmpty) return const SizedBox.shrink();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        const SizedBox(height: 16),
-        Text(
-          'Within-Source Duplicates (${allGroups.length})',
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        ...allGroups.asMap().entries.map((outerEntry) {
-          final int index = outerEntry.key;
-          final String sourceFolder = outerEntry.value.key;
-          final List<String> group = outerEntry.value.value;
-
-          // Look up entry metadata from the corresponding source.
-          final source = manifest.sources
-              .firstWhere((s) => s.selectedFolder == sourceFolder);
-
-          return Card(
-            margin: const EdgeInsets.only(bottom: 8),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    'Group ${index + 1} — ${group.length} identical files',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    _shortPath(sourceFolder),
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
-                  ),
-                  const SizedBox(height: 4),
-                  ...group.map((path) {
-                    final ManifestEntry? entry = source.entries
-                        .where((e) => e.relativePath == path)
-                        .firstOrNull;
-                    final sizeLabel = _formatSize(entry?.sizeBytes);
-                    final dateLabel = entry?.modifiedSecs != null
-                        ? _formatDate(entry!.modifiedSecs!)
-                        : '';
-                    final meta = [sizeLabel, dateLabel]
-                        .where((s) => s.isNotEmpty)
-                        .join(' · ');
-                    return Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Row(
-                        children: <Widget>[
-                          const Icon(Icons.content_copy,
-                              size: 14, color: Colors.orange),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: <Widget>[
-                                Text(path,
-                                    style: const TextStyle(fontSize: 13)),
-                                if (meta.isNotEmpty)
-                                  Text(meta,
-                                      style: const TextStyle(
-                                          fontSize: 11, color: Colors.grey)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }),
-                ],
-              ),
-            ),
-          );
-        }),
-      ],
-    );
-  }
-
   // ---------------------------------------------------------------------------
-  // UI builders — per-source manifest list (single-source only)
+  // UI builders — manifest entries
   // ---------------------------------------------------------------------------
-
-  Widget _buildManifestReview(UnifiedManifest manifest) {
-    if (manifest.sources.length != 1) {
-      return const Padding(
-        padding: EdgeInsets.only(top: 16),
-        child: Text(
-          'Add a single folder to browse its full file manifest.',
-          style: TextStyle(fontSize: 14, color: Colors.grey),
-        ),
-      );
-    }
-
-    final result = manifest.sources.first;
-    final visibleEntries = filterManifestEntries(
-      entries: result.entries,
-      filter: _entryFilter,
-      query: _searchQuery,
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        const SizedBox(height: 16),
-        const Text(
-          'Review manifest',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _searchController,
-          decoration: InputDecoration(
-            labelText: 'Search paths',
-            hintText: 'Filter by relative path',
-            border: const OutlineInputBorder(),
-            suffixIcon: _searchQuery.trim().isEmpty
-                ? null
-                : IconButton(
-                    onPressed: _searchController.clear,
-                    icon: const Icon(Icons.clear),
-                    tooltip: 'Clear search',
-                  ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: <Widget>[
-            ChoiceChip(
-              label: const Text('All'),
-              selected: _entryFilter == ManifestEntryFilter.all,
-              onSelected: (_) =>
-                  setState(() => _entryFilter = ManifestEntryFilter.all),
-            ),
-            ChoiceChip(
-              label: const Text('Folders'),
-              selected: _entryFilter == ManifestEntryFilter.directories,
-              onSelected: (_) =>
-                  setState(() => _entryFilter = ManifestEntryFilter.directories),
-            ),
-            ChoiceChip(
-              label: const Text('Files'),
-              selected: _entryFilter == ManifestEntryFilter.files,
-              onSelected: (_) =>
-                  setState(() => _entryFilter = ManifestEntryFilter.files),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Showing ${visibleEntries.length} of ${result.entries.length} entries',
-          style: const TextStyle(fontSize: 14),
-        ),
-        const SizedBox(height: 8),
-        if (visibleEntries.isEmpty)
-          const Text(
-            'No entries match the current filters.',
-            style: TextStyle(fontSize: 14, color: Colors.grey),
-          )
-        else
-          ...visibleEntries.map(_buildManifestTile),
-      ],
-    );
-  }
 
   Widget _buildManifestTile(ManifestEntry entry) {
     final double leftIndent = entry.depth * 20.0;
     String subtitle = entry.entryType;
-    if (entry.parentPath.isNotEmpty) subtitle = '${entry.parentPath} • $subtitle';
-    if (entry.sizeBytes != null) subtitle = '$subtitle • ${_formatSize(entry.sizeBytes)}';
+    if (entry.parentPath.isNotEmpty) {
+      subtitle = '${entry.parentPath} • $subtitle';
+    }
+    if (entry.sizeBytes != null) {
+      subtitle = '$subtitle • ${_formatSize(entry.sizeBytes)}';
+    }
+    if (entry.modifiedSecs != null) {
+      subtitle = '$subtitle • ${_formatDate(entry.modifiedSecs!)}';
+    }
 
     return Padding(
       padding: EdgeInsets.only(left: leftIndent),
@@ -616,13 +523,22 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     );
   }
 
+  List<Widget> _buildResultWidgets() {
+    final manifestResult = _manifestResult;
+    if (manifestResult == null) return <Widget>[];
+    return manifestResult.entries.map(_buildManifestTile).toList();
+  }
+
   // ---------------------------------------------------------------------------
   // Build
   // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
-    final unified = _unifiedManifest;
+    final folderPath = _selectedFolderPath;
+    final displayedPath = folderPath != null
+        ? _shortPath(folderPath)
+        : 'No folder selected';
 
     return Scaffold(
       appBar: AppBar(title: const Text('FileSteward')),
@@ -631,19 +547,33 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            const Text(
-              'Source Folders',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            _buildFolderList(),
-            if (unified != null) ...[
-              const SizedBox(height: 24),
-              _buildUnifiedSummaryCard(unified),
-              _buildCrossSourceGroups(unified),
-              _buildWithinSourceGroups(unified),
-              _buildManifestReview(unified),
+            Text(displayedPath, style: const TextStyle(fontSize: 16)),
+            if (_isInventoryRunning)
+              const Padding(
+                padding: EdgeInsets.only(top: 16),
+                child: LinearProgressIndicator(),
+              ),
+            if (_isRunning) ...<Widget>[
+              const SizedBox(height: 16),
+              LinearProgressIndicator(
+                value: _totalScanFiles > 0 ? _scanProgress : null,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _totalScanFiles > 0
+                    ? 'Scanning $_filesScanned / $_totalScanFiles files…'
+                    : 'Counting files…',
+                style: const TextStyle(fontSize: 13, color: Colors.grey),
+              ),
             ],
+            if (_inventoryResult != null) ...<Widget>[
+              const SizedBox(height: 24),
+              _buildScanSummaryCard(),
+              const SizedBox(height: 16),
+              _buildScanScopeCard(),
+            ],
+            const SizedBox(height: 24),
+            ..._buildResultWidgets(),
           ],
         ),
       ),
@@ -656,18 +586,21 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               children: <Widget>[
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _isScanning ? null : _addFolder,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add Folder'),
+                    onPressed: (_isInventoryRunning || _isRunning)
+                        ? null
+                        : _addFolder,
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('Select Folder'),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed:
-                        (_isScanning || _folders.isEmpty) ? null : _scanAll,
+                    onPressed: (_isRunning || _inventoryResult == null)
+                        ? null
+                        : _buildManifest,
                     icon: const Icon(Icons.search),
-                    label: Text(_isScanning ? 'Scanning…' : 'Scan All'),
+                    label: Text(_isRunning ? 'Scanning…' : 'Build Manifest'),
                   ),
                 ),
               ],
@@ -678,7 +611,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
                 const Text('Force rescan', style: TextStyle(fontSize: 13)),
                 Switch(
                   value: _forceRescan,
-                  onChanged: _isScanning
+                  onChanged: (_isInventoryRunning || _isRunning)
                       ? null
                       : (value) => setState(() => _forceRescan = value),
                 ),
@@ -694,13 +627,9 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 class _SummaryItem extends StatelessWidget {
   final String label;
   final String value;
-  final bool highlight;
+  final Color? color;
 
-  const _SummaryItem({
-    required this.label,
-    required this.value,
-    this.highlight = false,
-  });
+  const _SummaryItem({required this.label, required this.value, this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -714,7 +643,7 @@ class _SummaryItem extends StatelessWidget {
             style: TextStyle(
               fontSize: 22,
               fontWeight: FontWeight.bold,
-              color: highlight ? Colors.deepOrange : null,
+              color: color,
             ),
           ),
           const SizedBox(height: 4),
