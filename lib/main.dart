@@ -37,6 +37,13 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   final AgentBoardStatusWriter _statusWriter = const AgentBoardStatusWriter();
   String? _selectedFolderPath;
   String _statusMessage = 'Choose a folder, then build a recursive manifest.';
+  // Inventory (fast pass — runs automatically after folder selection)
+  InventoryResult? _inventoryResult;
+  bool _isInventoryRunning = false;
+  bool _sourcesExpanded = false;
+  Set<String> _selectedExtensions = {};
+
+  // Full manifest (hashing pass)
   ManifestResult? _manifestResult;
   bool _isRunning = false;
   ManifestEntryFilter _entryFilter = ManifestEntryFilter.all;
@@ -300,11 +307,14 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 
       setState(() {
         _selectedFolderPath = directoryPath;
+        _inventoryResult = null;
+        _selectedExtensions = {};
         _manifestResult = null;
         _entryFilter = ManifestEntryFilter.all;
         _searchController.clear();
-        _statusMessage = 'Selected folder:\n$directoryPath';
+        _statusMessage = 'Scanning file types…';
       });
+      unawaited(_runInventory(directoryPath));
       await _writeDashboardStatus(
         status: 'waiting',
         progressLabel: 'Folder selected and ready for manifest build.',
@@ -429,6 +439,52 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         _isRunning = false;
       });
     }
+  }
+
+  Future<void> _runInventory(String folderPath) async {
+    setState(() {
+      _isInventoryRunning = true;
+    });
+
+    try {
+      final result = await _manifestService.buildInventory(folderPath);
+      setState(() {
+        _inventoryResult = result;
+        _selectedExtensions = result.extensions.map((s) => s.extension).toSet();
+        _statusMessage =
+            'Ready. ${result.totalFiles} files found — adjust scope then build manifest.';
+      });
+    } on ManifestServiceException catch (e) {
+      setState(() {
+        _statusMessage = e.message;
+      });
+    } catch (e) {
+      setState(() {
+        _statusMessage = 'Error running inventory:\n\n$e';
+      });
+    } finally {
+      setState(() {
+        _isInventoryRunning = false;
+      });
+    }
+  }
+
+  int get _totalInventoryBytes =>
+      _inventoryResult?.extensions.fold<int>(0, (s, e) => s + e.totalBytes) ??
+      0;
+
+  int get _uniqueFileCount {
+    final result = _manifestResult;
+    if (result == null) return 0;
+    final duplicated =
+        result.duplicateGroups.expand((g) => g).toSet().length;
+    return result.totalFiles - duplicated;
+  }
+
+  int get _duplicateFileCount {
+    final result = _manifestResult;
+    if (result == null) return 0;
+    return result.duplicateGroups.expand((g) => g).toSet().length;
   }
 
   IconData _iconForEntryType(String entryType) {
@@ -650,6 +706,199 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     );
   }
 
+  Widget _buildScanSummaryCard() {
+    final inventory = _inventoryResult;
+    if (inventory == null) return const SizedBox.shrink();
+
+    final hasScan = _manifestResult != null;
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          InkWell(
+            onTap: () =>
+                setState(() => _sourcesExpanded = !_sourcesExpanded),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+              child: Row(
+                children: <Widget>[
+                  const Text(
+                    'Scan Summary',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    _sourcesExpanded
+                        ? 'Collapse ▴'
+                        : 'Expand for Source Details ▾',
+                    style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Wrap(
+              spacing: 24,
+              runSpacing: 16,
+              alignment: WrapAlignment.spaceEvenly,
+              children: <Widget>[
+                _SummaryItem(
+                  label: 'Files',
+                  value: inventory.totalFiles.toString(),
+                ),
+                _SummaryItem(
+                  label: 'Size',
+                  value: _formatSize(_totalInventoryBytes),
+                ),
+                if (hasScan) ...<Widget>[
+                  _SummaryItem(
+                    label: 'Unique',
+                    value: _uniqueFileCount.toString(),
+                    color: Colors.green[700],
+                  ),
+                  _SummaryItem(
+                    label: 'Duplicates',
+                    value: _duplicateFileCount.toString(),
+                    color: Colors.orange[700],
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (_sourcesExpanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: _buildSourceDetailCard(inventory),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSourceDetailCard(InventoryResult inventory) {
+    return Card(
+      color: Colors.grey[50],
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: Colors.grey[300]!),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Wrap(
+          spacing: 24,
+          runSpacing: 12,
+          alignment: WrapAlignment.spaceEvenly,
+          children: <Widget>[
+            _SummaryItem(
+              label: 'Files',
+              value: inventory.totalFiles.toString(),
+            ),
+            _SummaryItem(
+              label: 'Size',
+              value: _formatSize(_totalInventoryBytes),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildScanScopeCard() {
+    final inventory = _inventoryResult;
+    if (inventory == null || inventory.extensions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final maxCount = inventory.extensions.fold<int>(
+      0,
+      (m, s) => s.count > m ? s.count : m,
+    );
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Scan Scope',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Select the file types to include in the full scan.',
+              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 12),
+            ...inventory.extensions.map((stat) {
+              final label =
+                  stat.extension.isEmpty ? '(no extension)' : stat.extension;
+              final isSelected = _selectedExtensions.contains(stat.extension);
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  children: <Widget>[
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: Checkbox(
+                        value: isSelected,
+                        onChanged: (checked) {
+                          setState(() {
+                            if (checked == true) {
+                              _selectedExtensions.add(stat.extension);
+                            } else {
+                              _selectedExtensions.remove(stat.extension);
+                            }
+                          });
+                        },
+                        materialTapTargetSize:
+                            MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 72,
+                      child: Text(
+                        label,
+                        style: const TextStyle(fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: LinearProgressIndicator(
+                        value: maxCount > 0 ? stat.count / maxCount : 0,
+                        backgroundColor: Colors.grey[200],
+                        color: isSelected ? Colors.blue : Colors.grey[400],
+                        minHeight: 6,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${stat.count}  ${_formatSize(stat.totalBytes)}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[700],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
   List<Widget> _buildResultWidgets() {
     final manifestResult = _manifestResult;
     if (manifestResult == null) {
@@ -713,6 +962,17 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             Text(displayedPath, style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 24),
             Text(_statusMessage, style: const TextStyle(fontSize: 16)),
+            if (_isInventoryRunning)
+              const Padding(
+                padding: EdgeInsets.only(top: 16),
+                child: LinearProgressIndicator(),
+              ),
+            if (_inventoryResult != null) ...<Widget>[
+              const SizedBox(height: 24),
+              _buildScanSummaryCard(),
+              const SizedBox(height: 16),
+              _buildScanScopeCard(),
+            ],
             const SizedBox(height: 24),
             ..._buildResultWidgets(),
           ],
@@ -745,8 +1005,9 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
 class _SummaryItem extends StatelessWidget {
   final String label;
   final String value;
+  final Color? color;
 
-  const _SummaryItem({required this.label, required this.value});
+  const _SummaryItem({required this.label, required this.value, this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -757,7 +1018,11 @@ class _SummaryItem extends StatelessWidget {
         children: <Widget>[
           Text(
             value,
-            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
           ),
           const SizedBox(height: 4),
           Text(
