@@ -126,6 +126,8 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
     await for (final ScanEvent event in _manifestService.buildManifestStreaming(
       folderPath,
       forceRescan: _forceRescan,
+      includeExtensions:
+          _selectedExtensions.isNotEmpty ? _selectedExtensions : null,
     )) {
       switch (event) {
         case ScanProgress(:final filesScanned, :final totalFiles):

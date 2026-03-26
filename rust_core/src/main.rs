@@ -367,6 +367,25 @@ fn main() {
         return;
     }
 
+    // Parse --include-extensions .jpg,.pdf,... into a filter list.
+    let include_extensions: Option<Vec<String>> = args
+        .iter()
+        .skip_while(|a| *a != "--include-extensions")
+        .nth(1)
+        .map(|val| {
+            val.split(',')
+                .map(|e| {
+                    let t = e.trim().to_lowercase();
+                    if t.starts_with('.') {
+                        t
+                    } else {
+                        format!(".{}", t)
+                    }
+                })
+                .filter(|e| !e.is_empty() && e != ".")
+                .collect()
+        });
+
     let exists = root_path.exists();
     let is_directory = root_path.is_dir();
 
@@ -414,6 +433,7 @@ fn main() {
             streaming,
             &mut files_scanned,
             stream_total,
+            include_extensions.as_deref(),
         ) {
             eprintln!("Failed to build manifest: {}", err);
             std::process::exit(1);
@@ -456,6 +476,7 @@ fn walk_directory(
     streaming: bool,
     files_scanned: &mut usize,
     stream_total: usize,
+    include_extensions: Option<&[String]>,
 ) -> Result<(), String> {
     let read_dir = fs::read_dir(current_path).map_err(|err| err.to_string())?;
 
@@ -497,8 +518,20 @@ fn walk_directory(
                 streaming,
                 files_scanned,
                 stream_total,
+                include_extensions,
             )?;
         } else if metadata.is_file() {
+            // If a scope filter is set, skip files whose extension is not included.
+            if let Some(filter) = include_extensions {
+                let ext = entry_path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+                    .unwrap_or_default();
+                if !filter.iter().any(|f| f == &ext) {
+                    continue;
+                }
+            }
+
             *total_files += 1;
             let sha256 = hash_file(&entry_path);
 
@@ -810,6 +843,7 @@ mod tests {
             false,
             &mut files_scanned,
             0,
+            None,
         )
         .unwrap();
 
@@ -857,7 +891,7 @@ mod tests {
         let mut files_scanned = 0;
         walk_directory(
             dir, dir, &mut entries, &mut total_dirs, &mut total_files,
-            false, &mut files_scanned, 0,
+            false, &mut files_scanned, 0, None,
         )
         .unwrap();
         let duplicate_groups = build_duplicate_groups(&entries);
@@ -977,5 +1011,77 @@ mod tests {
             load_cached_manifest(dir.path()).is_none(),
             "Should return None when no cache file exists"
         );
+    }
+
+    // --- walk_directory extension filter ---
+
+    #[test]
+    fn test_walk_with_extension_filter_only_includes_matching_files() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "photo.jpg", b"img");
+        write_file(dir.path(), "document.pdf", b"doc");
+        write_file(dir.path(), "notes.txt", b"txt");
+
+        let filter = vec![".jpg".to_string(), ".pdf".to_string()];
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+
+        walk_directory(
+            dir.path(), dir.path(), &mut entries, &mut total_dirs,
+            &mut total_files, false, &mut files_scanned, 0, Some(&filter),
+        )
+        .unwrap();
+
+        assert_eq!(total_files, 2);
+        let names: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.ends_with("photo.jpg")));
+        assert!(names.iter().any(|n| n.ends_with("document.pdf")));
+        assert!(!names.iter().any(|n| n.ends_with("notes.txt")));
+    }
+
+    #[test]
+    fn test_walk_with_no_filter_includes_all_files() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.jpg", b"img");
+        write_file(dir.path(), "b.txt", b"txt");
+
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+
+        walk_directory(
+            dir.path(), dir.path(), &mut entries, &mut total_dirs,
+            &mut total_files, false, &mut files_scanned, 0, None,
+        )
+        .unwrap();
+
+        assert_eq!(total_files, 2);
+    }
+
+    #[test]
+    fn test_walk_filter_always_includes_directories() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "sub/photo.jpg", b"img");
+        write_file(dir.path(), "sub/notes.txt", b"txt");
+
+        let filter = vec![".jpg".to_string()];
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+
+        walk_directory(
+            dir.path(), dir.path(), &mut entries, &mut total_dirs,
+            &mut total_files, false, &mut files_scanned, 0, Some(&filter),
+        )
+        .unwrap();
+
+        assert_eq!(total_dirs, 1, "Directory should still be counted");
+        assert_eq!(total_files, 1, "Only .jpg file should be counted");
+        let has_dir = entries.iter().any(|e| e.entry_type == "directory");
+        assert!(has_dir, "Directory entry should be present regardless of filter");
     }
 }

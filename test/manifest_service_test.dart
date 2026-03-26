@@ -62,6 +62,29 @@ void main() {
     );
   });
 
+  test('buildManifest passes --include-extensions flag when scope is set',
+      () async {
+    const service = ManifestService(
+      rustBinaryResolver: _fakeRustBinary,
+      processRunner: _extensionFlagCheckRun,
+    );
+
+    // Completes without throwing — flag assertion is inside the runner.
+    await service.buildManifest(
+      '/tmp/example',
+      includeExtensions: {'.jpg', '.pdf'},
+    );
+  });
+
+  test('buildManifest omits --include-extensions when scope is null', () async {
+    const service = ManifestService(
+      rustBinaryResolver: _fakeRustBinary,
+      processRunner: _noExtensionFlagRun,
+    );
+
+    await service.buildManifest('/tmp/example');
+  });
+
   // ---------------------------------------------------------------------------
   // buildInventory
   // ---------------------------------------------------------------------------
@@ -320,6 +343,45 @@ Stream<String> _streamingWithUnknownEventRunner(
   yield '{"type":"result","selected_folder":"/tmp/example","exists":true,'
       '"is_directory":true,"total_directories":0,"total_files":0,'
       '"duplicate_groups":[],"entries":[]}';
+}
+
+Future<ProcessResult> _extensionFlagCheckRun(
+  String executable,
+  List<String> arguments,
+) async {
+  expect(arguments, contains('--include-extensions'));
+  final idx = arguments.indexOf('--include-extensions');
+  final extArg = arguments[idx + 1];
+  expect(extArg, allOf(contains('.jpg'), contains('.pdf')));
+  return ProcessResult(1, 0, '''
+{
+  "selected_folder": "/tmp/example",
+  "exists": true,
+  "is_directory": true,
+  "total_directories": 0,
+  "total_files": 0,
+  "duplicate_groups": [],
+  "entries": []
+}
+''', '');
+}
+
+Future<ProcessResult> _noExtensionFlagRun(
+  String executable,
+  List<String> arguments,
+) async {
+  expect(arguments, isNot(contains('--include-extensions')));
+  return ProcessResult(1, 0, '''
+{
+  "selected_folder": "/tmp/example",
+  "exists": true,
+  "is_directory": true,
+  "total_directories": 0,
+  "total_files": 0,
+  "duplicate_groups": [],
+  "entries": []
+}
+''', '');
 }
 
 Future<ProcessResult> _inventoryProcessRun(
