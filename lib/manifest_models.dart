@@ -35,6 +35,58 @@ class ManifestEntry {
   }
 }
 
+/// One row returned by the Rust --inventory-only pass.
+class ExtensionStat {
+  final String extension;
+  final int count;
+  final int totalBytes;
+
+  ExtensionStat({
+    required this.extension,
+    required this.count,
+    required this.totalBytes,
+  });
+
+  factory ExtensionStat.fromJson(Map<String, dynamic> json) {
+    return ExtensionStat(
+      extension: json['extension'] as String? ?? '',
+      count: json['count'] as int? ?? 0,
+      totalBytes: json['total_bytes'] as int? ?? 0,
+    );
+  }
+}
+
+/// Output of the Rust --inventory-only pass: extension breakdown, no hashes.
+class InventoryResult {
+  final String selectedFolder;
+  final bool exists;
+  final bool isDirectory;
+  final int totalFiles;
+  final List<ExtensionStat> extensions;
+
+  InventoryResult({
+    required this.selectedFolder,
+    required this.exists,
+    required this.isDirectory,
+    required this.totalFiles,
+    required this.extensions,
+  });
+
+  factory InventoryResult.fromJson(Map<String, dynamic> json) {
+    final List<dynamic> rawExts = json['extensions'] as List<dynamic>? ?? [];
+    final extensions = rawExts
+        .map((e) => ExtensionStat.fromJson(e as Map<String, dynamic>))
+        .toList();
+    return InventoryResult(
+      selectedFolder: json['selected_folder'] as String? ?? '',
+      exists: json['exists'] as bool? ?? false,
+      isDirectory: json['is_directory'] as bool? ?? false,
+      totalFiles: json['total_files'] as int? ?? 0,
+      extensions: extensions,
+    );
+  }
+}
+
 class ManifestResult {
   final String selectedFolder;
   final bool exists;

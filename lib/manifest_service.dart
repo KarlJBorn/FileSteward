@@ -54,6 +54,38 @@ class ManifestService {
     }
   }
 
+  Future<InventoryResult> buildInventory(String selectedFolderPath) async {
+    final File? rustBinary = _resolveRustBinary();
+    if (rustBinary == null) {
+      throw const ManifestServiceException(
+        'Rust binary not found.\n\nBuild it first with:\n'
+        'cargo build --manifest-path rust_core/Cargo.toml',
+      );
+    }
+
+    final processResult = await processRunner(rustBinary.path, <String>[
+      selectedFolderPath,
+      '--inventory-only',
+    ]);
+
+    final String stdoutText = processResult.stdout.toString().trim();
+    final String stderrText = processResult.stderr.toString().trim();
+
+    if (processResult.exitCode != 0) {
+      throw ManifestServiceException('Rust inventory failed.\n\n$stderrText');
+    }
+
+    try {
+      final Map<String, dynamic> decodedJson =
+          jsonDecode(stdoutText) as Map<String, dynamic>;
+      return InventoryResult.fromJson(decodedJson);
+    } on FormatException catch (error) {
+      throw ManifestServiceException(
+        'Invalid JSON from Rust inventory.\n\n$error',
+      );
+    }
+  }
+
   File? _resolveRustBinary() {
     final resolvedBinary = rustBinaryResolver?.call();
     if (resolvedBinary != null) {
