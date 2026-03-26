@@ -40,6 +40,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
   InventoryResult? _inventoryResult;
   bool _isInventoryRunning = false;
   bool _sourcesExpanded = false;
+  bool _excludedExpanded = false;
   Set<String> _selectedExtensions = {};
 
   // Full manifest (streaming hashing pass)
@@ -65,6 +66,7 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         _selectedFolderPath = directoryPath;
         _inventoryResult = null;
         _selectedExtensions = {};
+        _excludedExpanded = false;
         _manifestResult = null;
       });
       unawaited(_runInventory(directoryPath));
@@ -464,74 +466,123 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
                 ],
               ),
             const Divider(height: 16),
-            ...visibleExtensions.map((stat) {
-              final label =
-                  stat.extension.isEmpty ? '(no extension)' : stat.extension;
-              final isSelected = _selectedExtensions.contains(stat.extension);
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: Row(
+            ...inventory.extensions.where((stat) {
+              if (hasScan) return _selectedExtensions.contains(stat.extension);
+              return true;
+            }).map((stat) => _buildExtensionRow(stat, maxCount, enabled: !hasScan)),
+            if (hasScan)
+              Builder(builder: (context) {
+                final excluded = inventory.extensions
+                    .where((s) => !_selectedExtensions.contains(s.extension))
+                    .toList();
+                if (excluded.isEmpty) return const SizedBox.shrink();
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: Checkbox(
-                        value: isSelected,
-                        onChanged: hasScan
-                            ? null
-                            : (checked) {
-                                setState(() {
-                                  if (checked == true) {
-                                    _selectedExtensions.add(stat.extension);
-                                  } else {
-                                    _selectedExtensions
-                                        .remove(stat.extension);
-                                  }
-                                });
-                              },
-                        materialTapTargetSize:
-                            MaterialTapTargetSize.shrinkWrap,
+                    const Divider(height: 16),
+                    InkWell(
+                      onTap: () => setState(
+                          () => _excludedExpanded = !_excludedExpanded),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          children: <Widget>[
+                            Icon(
+                              _excludedExpanded
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
+                              size: 16,
+                              color: Colors.grey[500],
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${excluded.length} type${excluded.length == 1 ? '' : 's'} excluded',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey[500],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 72,
-                      child: Text(
-                        label,
-                        style: const TextStyle(fontSize: 13),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: LinearProgressIndicator(
-                        value: maxCount > 0 ? stat.count / maxCount : 0,
-                        backgroundColor: Colors.grey[200],
-                        color: isSelected ? Colors.blue : Colors.grey[400],
-                        minHeight: 6,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${stat.count}  ${_formatSize(stat.totalBytes)}',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[700],
-                      ),
-                    ),
+                    if (_excludedExpanded)
+                      ...excluded.map((stat) =>
+                          _buildExtensionRow(stat, maxCount, enabled: false)),
                   ],
-                ),
-              );
-            }),
-            if (hasScan && excludedCount > 0) ...<Widget>[
-              const SizedBox(height: 8),
-              Text(
-                '$excludedCount excluded type${excludedCount > 1 ? 's' : ''} hidden',
-                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-              ),
-            ],
+                );
+              }),
           ],
         ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // UI builders — extension row helper
+  // ---------------------------------------------------------------------------
+
+  Widget _buildExtensionRow(
+    ExtensionStat stat,
+    int maxCount, {
+    required bool enabled,
+  }) {
+    final label =
+        stat.extension.isEmpty ? '(no extension)' : stat.extension;
+    final isSelected = _selectedExtensions.contains(stat.extension);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: <Widget>[
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: Checkbox(
+              value: isSelected,
+              onChanged: enabled
+                  ? (checked) {
+                      setState(() {
+                        if (checked == true) {
+                          _selectedExtensions.add(stat.extension);
+                        } else {
+                          _selectedExtensions.remove(stat.extension);
+                        }
+                      });
+                    }
+                  : null,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 72,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                color: enabled ? null : Colors.grey[400],
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: LinearProgressIndicator(
+              value: maxCount > 0 ? stat.count / maxCount : 0,
+              backgroundColor: Colors.grey[200],
+              color: isSelected ? Colors.blue : Colors.grey[300],
+              minHeight: 6,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '${stat.count}  ${_formatSize(stat.totalBytes)}',
+            style: TextStyle(
+              fontSize: 12,
+              color: enabled ? Colors.grey[700] : Colors.grey[400],
+            ),
+          ),
+        ],
       ),
     );
   }
