@@ -405,14 +405,6 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
       (m, s) => s.count > m ? s.count : m,
     );
 
-    final visibleExtensions = hasScan
-        ? inventory.extensions
-            .where((s) => _selectedExtensions.contains(s.extension))
-            .toList()
-        : inventory.extensions;
-    final excludedCount =
-        inventory.extensions.length - visibleExtensions.length;
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
