@@ -40,7 +40,10 @@ class ManifestService {
   // Batch (non-streaming) path — used by existing callers and tests.
   // ---------------------------------------------------------------------------
 
-  Future<ManifestResult> buildManifest(String selectedFolderPath) async {
+  Future<ManifestResult> buildManifest(
+    String selectedFolderPath, {
+    Set<String>? includeExtensions,
+  }) async {
     final File? rustBinary = _resolveRustBinary();
     if (rustBinary == null) {
       throw const ManifestServiceException(
@@ -51,6 +54,10 @@ class ManifestService {
 
     final processResult = await processRunner(rustBinary.path, <String>[
       selectedFolderPath,
+      if (includeExtensions != null && includeExtensions.isNotEmpty) ...[
+        '--include-extensions',
+        includeExtensions.join(','),
+      ],
     ]);
 
     final String stdoutText = processResult.stdout.toString().trim();
@@ -80,6 +87,7 @@ class ManifestService {
   Stream<ScanEvent> buildManifestStreaming(
     String selectedFolderPath, {
     bool forceRescan = false,
+    Set<String>? includeExtensions,
   }) async* {
     final File? rustBinary = _resolveRustBinary();
     if (rustBinary == null) {
@@ -90,27 +98,26 @@ class ManifestService {
       return;
     }
 
+    final List<String> args = <String>[
+      selectedFolderPath,
+      '--stream-progress',
+      if (forceRescan) '--force-rescan',
+      if (includeExtensions != null && includeExtensions.isNotEmpty) ...[
+        '--include-extensions',
+        includeExtensions.join(','),
+      ],
+    ];
+
     final Stream<String> lines;
 
     if (streamingProcessRunner != null) {
       // Injected runner — used in tests.
-      lines = streamingProcessRunner!(
-        rustBinary.path,
-        <String>[
-          selectedFolderPath,
-          '--stream-progress',
-          if (forceRescan) '--force-rescan',
-        ],
-      );
+      lines = streamingProcessRunner!(rustBinary.path, args);
     } else {
       // Real process — spawn and stream stdout line by line.
       final Process process;
       try {
-        process = await Process.start(rustBinary.path, <String>[
-          selectedFolderPath,
-          '--stream-progress',
-          if (forceRescan) '--force-rescan',
-        ]);
+        process = await Process.start(rustBinary.path, args);
       } catch (e) {
         yield ScanError('Failed to start Rust process: $e');
         return;
@@ -147,6 +154,42 @@ class ManifestService {
       if (line.trim().isEmpty) continue;
       final ScanEvent? event = _parseNdjsonLine(line);
       if (event != null) yield event;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inventory path — passes --inventory-only to Rust, no hashing.
+  // ---------------------------------------------------------------------------
+
+  Future<InventoryResult> buildInventory(String selectedFolderPath) async {
+    final File? rustBinary = _resolveRustBinary();
+    if (rustBinary == null) {
+      throw const ManifestServiceException(
+        'Rust binary not found.\n\nBuild it first with:\n'
+        'cargo build --manifest-path rust_core/Cargo.toml',
+      );
+    }
+
+    final processResult = await processRunner(rustBinary.path, <String>[
+      selectedFolderPath,
+      '--inventory-only',
+    ]);
+
+    final String stdoutText = processResult.stdout.toString().trim();
+    final String stderrText = processResult.stderr.toString().trim();
+
+    if (processResult.exitCode != 0) {
+      throw ManifestServiceException('Rust inventory failed.\n\n$stderrText');
+    }
+
+    try {
+      final Map<String, dynamic> decodedJson =
+          jsonDecode(stdoutText) as Map<String, dynamic>;
+      return InventoryResult.fromJson(decodedJson);
+    } on FormatException catch (error) {
+      throw ManifestServiceException(
+        'Invalid JSON from Rust inventory.\n\n$error',
+      );
     }
   }
 

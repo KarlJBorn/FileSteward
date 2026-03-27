@@ -92,6 +92,64 @@ fn get_modified_secs(metadata: &fs::Metadata) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+#[derive(Serialize)]
+struct ExtensionStat {
+    extension: String,
+    count: usize,
+    total_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct InventoryResult {
+    selected_folder: String,
+    exists: bool,
+    is_directory: bool,
+    total_files: usize,
+    extensions: Vec<ExtensionStat>,
+}
+
+fn inventory_walk(root_path: &Path) -> Result<Vec<ExtensionStat>, String> {
+    let mut counts: HashMap<String, (usize, u64)> = HashMap::new();
+    inventory_walk_dir(root_path, root_path, &mut counts)?;
+
+    let mut stats: Vec<ExtensionStat> = counts
+        .into_iter()
+        .map(|(ext, (count, total_bytes))| ExtensionStat {
+            extension: ext,
+            count,
+            total_bytes,
+        })
+        .collect();
+
+    stats.sort_by(|a, b| b.count.cmp(&a.count).then(a.extension.cmp(&b.extension)));
+    Ok(stats)
+}
+
+fn inventory_walk_dir(
+    root_path: &Path,
+    current_path: &Path,
+    counts: &mut HashMap<String, (usize, u64)>,
+) -> Result<(), String> {
+    let read_dir = fs::read_dir(current_path).map_err(|e| e.to_string())?;
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        if metadata.is_dir() {
+            inventory_walk_dir(root_path, &path, counts)?;
+        } else if metadata.is_file() {
+            let ext = path
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+                .unwrap_or_default();
+            let entry_ref = counts.entry(ext).or_insert((0, 0));
+            entry_ref.0 += 1;
+            entry_ref.1 += metadata.len();
+        }
+    }
+    Ok(())
+}
+
 fn hash_file(path: &Path) -> Option<String> {
     let mut file = fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
@@ -277,6 +335,57 @@ fn main() {
     let force_rescan = args.contains(&"--force-rescan".to_string());
     let root_path = Path::new(folder_path);
 
+    if args.iter().any(|a| a == "--inventory-only") {
+        let exists = root_path.exists();
+        let is_directory = root_path.is_dir();
+        let extensions = if exists && is_directory {
+            match inventory_walk(root_path) {
+                Ok(stats) => stats,
+                Err(err) => {
+                    eprintln!("Failed to build inventory: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let total_files: usize = extensions.iter().map(|s| s.count).sum();
+        let result = InventoryResult {
+            selected_folder: folder_path.to_string(),
+            exists,
+            is_directory,
+            total_files,
+            extensions,
+        };
+        match serde_json::to_string_pretty(&result) {
+            Ok(json) => println!("{}", json),
+            Err(err) => {
+                eprintln!("Failed to serialize JSON: {}", err);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Parse --include-extensions .jpg,.pdf,... into a filter list.
+    let include_extensions: Option<Vec<String>> = args
+        .iter()
+        .skip_while(|a| *a != "--include-extensions")
+        .nth(1)
+        .map(|val| {
+            val.split(',')
+                .map(|e| {
+                    let t = e.trim().to_lowercase();
+                    if t.starts_with('.') {
+                        t
+                    } else {
+                        format!(".{}", t)
+                    }
+                })
+                .filter(|e| !e.is_empty() && e != ".")
+                .collect()
+        });
+
     let exists = root_path.exists();
     let is_directory = root_path.is_dir();
 
@@ -324,6 +433,7 @@ fn main() {
             streaming,
             &mut files_scanned,
             stream_total,
+            include_extensions.as_deref(),
         ) {
             eprintln!("Failed to build manifest: {}", err);
             std::process::exit(1);
@@ -366,6 +476,7 @@ fn walk_directory(
     streaming: bool,
     files_scanned: &mut usize,
     stream_total: usize,
+    include_extensions: Option<&[String]>,
 ) -> Result<(), String> {
     let read_dir = fs::read_dir(current_path).map_err(|err| err.to_string())?;
 
@@ -407,8 +518,20 @@ fn walk_directory(
                 streaming,
                 files_scanned,
                 stream_total,
+                include_extensions,
             )?;
         } else if metadata.is_file() {
+            // If a scope filter is set, skip files whose extension is not included.
+            if let Some(filter) = include_extensions {
+                let ext = entry_path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+                    .unwrap_or_default();
+                if !filter.iter().any(|f| f == &ext) {
+                    continue;
+                }
+            }
+
             *total_files += 1;
             let sha256 = hash_file(&entry_path);
 
@@ -465,6 +588,54 @@ mod tests {
             sha256: sha256.map(|s| s.into()),
             modified_secs: None,
         }
+    }
+
+    // --- inventory_walk ---
+
+    #[test]
+    fn test_inventory_walk_counts_by_extension() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.jpg", b"img");
+        write_file(dir.path(), "b.jpg", b"img2");
+        write_file(dir.path(), "c.pdf", b"doc");
+
+        let stats = inventory_walk(dir.path()).unwrap();
+        let jpg = stats.iter().find(|s| s.extension == ".jpg").unwrap();
+        let pdf = stats.iter().find(|s| s.extension == ".pdf").unwrap();
+        assert_eq!(jpg.count, 2);
+        assert_eq!(pdf.count, 1);
+    }
+
+    #[test]
+    fn test_inventory_walk_accumulates_sizes() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.txt", b"hello");
+        write_file(dir.path(), "b.txt", b"world!");
+
+        let stats = inventory_walk(dir.path()).unwrap();
+        let txt = stats.iter().find(|s| s.extension == ".txt").unwrap();
+        assert_eq!(txt.total_bytes, 11); // 5 + 6
+    }
+
+    #[test]
+    fn test_inventory_walk_is_recursive() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "top.jpg", b"t");
+        write_file(dir.path(), "sub/nested.jpg", b"n");
+
+        let stats = inventory_walk(dir.path()).unwrap();
+        let jpg = stats.iter().find(|s| s.extension == ".jpg").unwrap();
+        assert_eq!(jpg.count, 2);
+    }
+
+    #[test]
+    fn test_inventory_walk_files_without_extension() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "README", b"no ext");
+
+        let stats = inventory_walk(dir.path()).unwrap();
+        let no_ext = stats.iter().find(|s| s.extension.is_empty()).unwrap();
+        assert_eq!(no_ext.count, 1);
     }
 
     // --- hash_file ---
@@ -672,6 +843,7 @@ mod tests {
             false,
             &mut files_scanned,
             0,
+            None,
         )
         .unwrap();
 
@@ -719,7 +891,7 @@ mod tests {
         let mut files_scanned = 0;
         walk_directory(
             dir, dir, &mut entries, &mut total_dirs, &mut total_files,
-            false, &mut files_scanned, 0,
+            false, &mut files_scanned, 0, None,
         )
         .unwrap();
         let duplicate_groups = build_duplicate_groups(&entries);
@@ -839,5 +1011,77 @@ mod tests {
             load_cached_manifest(dir.path()).is_none(),
             "Should return None when no cache file exists"
         );
+    }
+
+    // --- walk_directory extension filter ---
+
+    #[test]
+    fn test_walk_with_extension_filter_only_includes_matching_files() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "photo.jpg", b"img");
+        write_file(dir.path(), "document.pdf", b"doc");
+        write_file(dir.path(), "notes.txt", b"txt");
+
+        let filter = vec![".jpg".to_string(), ".pdf".to_string()];
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+
+        walk_directory(
+            dir.path(), dir.path(), &mut entries, &mut total_dirs,
+            &mut total_files, false, &mut files_scanned, 0, Some(&filter),
+        )
+        .unwrap();
+
+        assert_eq!(total_files, 2);
+        let names: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.ends_with("photo.jpg")));
+        assert!(names.iter().any(|n| n.ends_with("document.pdf")));
+        assert!(!names.iter().any(|n| n.ends_with("notes.txt")));
+    }
+
+    #[test]
+    fn test_walk_with_no_filter_includes_all_files() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "a.jpg", b"img");
+        write_file(dir.path(), "b.txt", b"txt");
+
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+
+        walk_directory(
+            dir.path(), dir.path(), &mut entries, &mut total_dirs,
+            &mut total_files, false, &mut files_scanned, 0, None,
+        )
+        .unwrap();
+
+        assert_eq!(total_files, 2);
+    }
+
+    #[test]
+    fn test_walk_filter_always_includes_directories() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "sub/photo.jpg", b"img");
+        write_file(dir.path(), "sub/notes.txt", b"txt");
+
+        let filter = vec![".jpg".to_string()];
+        let mut entries = Vec::new();
+        let mut total_dirs = 0;
+        let mut total_files = 0;
+        let mut files_scanned = 0;
+
+        walk_directory(
+            dir.path(), dir.path(), &mut entries, &mut total_dirs,
+            &mut total_files, false, &mut files_scanned, 0, Some(&filter),
+        )
+        .unwrap();
+
+        assert_eq!(total_dirs, 1, "Directory should still be counted");
+        assert_eq!(total_files, 1, "Only .jpg file should be counted");
+        let has_dir = entries.iter().any(|e| e.entry_type == "directory");
+        assert!(has_dir, "Directory entry should be present regardless of filter");
     }
 }
