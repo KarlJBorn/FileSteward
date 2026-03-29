@@ -36,12 +36,19 @@ Always build Rust before running Flutter (`make rust-build` first) since Flutter
 
 ## Product Vision
 
-FileSteward rationalizes consolidated backup disks — finding duplicates, classifying files, recommending safe actions, and providing a full audit trail. It is **not** a bulk-delete tool; it is an analysis and decision-support tool.
+FileSteward is a personal file lifecycle manager with three distinct modes:
+
+- **Clean** — rationalize a canonical operating directory: fix folder structure, remove duplicate files, enforce organization
+- **Consolidate** — extract unique files from backup archives and integrate them into the canonical directory; sources are never modified
+- **Maintain** — ongoing dedup, archival, and rule enforcement on live working directories
+
+It is **not** a bulk-delete tool; it is an analysis and decision-support tool. Every action is proposed, simulated, and confirmed before execution. Destructive operations use quarantine (move to staging) rather than permanent deletion.
 
 **Design principles:**
 - Safety over cleverness — default to analyze, recommend, quarantine, confirm; never default to destructive action
 - Explainability over magic — every recommendation must show its basis (same hash, newer timestamp, user rule, etc.)
 - Engine first, UI second — the Rust core must be fully testable from CLI independent of any UI
+- **Rust owns all execution** — all filesystem operations (rename, move, quarantine, log) are performed by the Rust engine; Flutter is UI only and never touches the filesystem directly
 - Desktop first, mobile second — macOS/Windows for full-drive rationalization; iPad/iPhone for review and targeted scans
 
 **Target platforms:** macOS (primary), Windows 11, iPadOS, iPhoneOS. No Android target.
@@ -65,41 +72,68 @@ The core entities the app reasons about:
 
 ## Iteration Plan
 
-### Iteration 1 — CLI Engine + Manifest (current)
-**Status:** Mostly complete. Hashing not yet implemented.
-
-Done:
+### Iteration 1 — CLI Engine + Manifest ✅ Complete
 - Rust recursive directory walker with metadata
 - JSON manifest output (relative path, type, size)
 - Flutter UI: folder selection, manifest display, filtering
 - GitHub Actions CI pipeline
 - Test corpus and Flutter unit tests
 
-**Remaining to complete Iteration 1:**
-- SHA-256 file hashing in Rust (add to `ManifestEntry`)
+### Iteration 2 — Hashing, Duplicate Detection, Streaming ✅ Complete
+- SHA-256 file hashing in Rust (scoped by extension)
 - Exact duplicate detection: group files by hash
-- Expose duplicate groups in the JSON output
+- Duplicate groups exposed in JSON output
+- Streaming progress from Rust to Flutter UI
 - Flutter model and UI updates to show duplicate groups
-- Tests: fixture-based duplicate detection tests in Rust; Flutter tests for duplicate group parsing
 
-### Iteration 2 — Desktop UI: Scan, Review, Export
-- Full desktop Flutter UI for macOS (and Windows)
-- Safe simulation mode (propose actions, no execution)
-- Quarantine workflow (move to staging, not delete)
+### Iteration 3 — Directory Rationalization (next)
+**Goal:** Analyze and reorganize the folder structure of a canonical directory. Folder-level operations only — no file content analysis.
+
+- Scan and analyze folder structure for structural problems:
+  - Redundant or near-duplicate folder names
+  - Inconsistent naming conventions
+  - Overly deep nesting
+  - Misplaced files (e.g. `.jpg` in `Documents/`)
+  - Empty or near-empty folders
+- Review UI: surface findings, propose folder-level changes
+- Simulate proposed changes before touching the filesystem
+- Execute approved changes with undo/quarantine safety net
+- Execution log
+
+### Iteration 4 — File Cleanup
+**Goal:** Within the rationalized directory structure, find and resolve duplicate files.
+
+- Review UI for duplicate groups: open a group, see all copies, mark which to keep
+- Quarantine workflow: move discarded copies to staging folder (never delete outright)
+- Simulation mode: preview what would be removed/freed before execution
+- Execute approved actions with full execution log
 - Export scan report (CSV or JSON)
 
-### Iteration 3 — Rules Engine + Similarity + Undo
-- Similarity detection (name-based, image-based)
-- User-defined rules (prefer newer, prefer higher resolution, folder priority)
-- Undo / revert operations
-- Full audit log
+### Iteration 5 — Consolidate (Backup Integration)
+**Goal:** Read backup archives, extract files not already present in the canonical directory, and copy them in using the canonical structure as the schema. Sources are never modified.
 
-### Iteration 4 — iPad/iPhone Review Client
+- Define canonical directory as the organizational template
+- Scan backup sources against canonical (dedup across sources)
+- Map unique files to their target location in canonical structure
+- Copy (never move) selected files to target
+- Output destination options: offline archive, iCloud unsynced folder, or merge into canonical
+
+### Iteration 6 — Maintain
+**Goal:** Ongoing dedup, archival, and rule enforcement on live working directories.
+
+- Monitor canonical directory for changes
+- Enforce user-defined rules (naming conventions, folder structure, file type placement)
+- Recurring dedup checks against the canonical index
+- Archive aging files based on access patterns or explicit rules
+- Execution log and undo support
+
+### Iteration 7 — iPad/iPhone Review Client
 - Narrower scope: open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
+- **Quarantine browser** — browse items moved to quarantine in prior sessions, restore to target
 
-### Iteration 5 — Advanced UX + Performance
+### Iteration 8 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
 - Recommendation engine
 - Performance tuning for large external drives (100k+ files)

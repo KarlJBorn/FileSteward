@@ -1,3 +1,6 @@
+mod convention;
+mod rationalize;
+
 use hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -326,8 +329,19 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("No folder path was provided.");
+        eprintln!("Usage: rust_core <folder_path> [--stream-progress] [--force-rescan]");
+        eprintln!("       rust_core rationalize <folder_path>");
         std::process::exit(1);
+    }
+
+    // Subcommand dispatch — rationalize mode (Iteration 3)
+    if args[1] == "rationalize" {
+        if args.len() < 3 {
+            eprintln!("Usage: rust_core rationalize <folder_path>");
+            std::process::exit(1);
+        }
+        rationalize::run(&args[2]);
+        return;
     }
 
     let folder_path = &args[1];

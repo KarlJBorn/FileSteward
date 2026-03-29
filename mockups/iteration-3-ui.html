@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FileSteward — Directory Rationalization</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-size: 13px;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    background: #2c2c2e;
+    border-bottom: 1px solid #3a3a3c;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .toolbar-path { font-size: 12px; color: #98989d; flex: 1; }
+  .toolbar-path span { color: #e0e0e0; }
+  .stat-pill { border-radius: 10px; padding: 2px 10px; font-size: 12px; }
+  .stat-pill.red    { background: rgba(255,69,58,0.2);  color: #ff453a; }
+  .stat-pill.yellow { background: rgba(255,214,10,0.2); color: #ffd60a; }
+  .stat-pill.gray   { background: #3a3a3c; color: #98989d; }
+
+  /* ── Layout ── */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Custom checkbox ── */
+  .cb {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px; height: 18px;
+    border-radius: 5px;
+    border: 2px solid #555;
+    background: #2c2c2e;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    user-select: none;
+  }
+  .cb:hover { border-color: #0a84ff; }
+  .cb.checked {
+    background: #0a84ff;
+    border-color: #0a84ff;
+  }
+  .cb.checked::after {
+    content: '';
+    display: block;
+    width: 5px; height: 9px;
+    border: 2px solid #fff;
+    border-top: none;
+    border-left: none;
+    transform: rotate(45deg) translate(-1px, -1px);
+  }
+  .cb.indeterminate {
+    background: #0a84ff;
+    border-color: #0a84ff;
+  }
+  .cb.indeterminate::after {
+    content: '';
+    display: block;
+    width: 8px; height: 2px;
+    background: #fff;
+    border-radius: 1px;
+  }
+
+  /* ── Findings panel ── */
+  .findings-panel {
+    width: 390px;
+    flex-shrink: 0;
+    border-right: 1px solid #3a3a3c;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 9px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #98989d;
+    border-bottom: 1px solid #3a3a3c;
+    flex-shrink: 0;
+  }
+  .findings-scroll { overflow-y: auto; flex: 1; }
+
+  /* ── Finding group ── */
+  .finding-group { border-bottom: 1px solid #2c2c2e; }
+  .group-header {
+    padding: 7px 14px;
+    background: #252527;
+    font-size: 11px;
+    font-weight: 600;
+    color: #98989d;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  .group-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .group-count { background: #3a3a3c; border-radius: 8px; padding: 1px 6px; font-size: 10px; }
+  .group-spacer { flex: 1; }
+  .group-cb-label { font-size: 10px; color: #636366; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+  /* ── Finding row ── */
+  .finding-row {
+    padding: 9px 12px 9px 12px;
+    border-bottom: 1px solid #262628;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+    transition: background 0.1s;
+    border-left: 2px solid transparent;
+  }
+  .finding-row:hover { background: #2c2c2e; }
+  .finding-row.selected { background: #1a3050; border-left-color: #0a84ff; }
+  .finding-row.dismissed { display: none; }
+
+  .row-content { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .finding-title { font-size: 12px; color: #e0e0e0; display: flex; align-items: center; gap: 6px; }
+  .finding-path {
+    font-size: 11px; color: #555;
+    font-family: "SF Mono", "Menlo", monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .finding-dest {
+    font-size: 11px; color: #98989d;
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    margin-top: 1px;
+  }
+  .dest-value { color: #0a84ff; font-family: "SF Mono","Menlo",monospace; font-size: 11px; }
+  .dest-override {
+    font-size: 10px; color: #555; text-decoration: underline; cursor: pointer;
+  }
+  .dest-override:hover { color: #98989d; }
+
+  /* Inline alt-location picker */
+  .alt-location {
+    display: none; flex-direction: column; gap: 5px; margin-top: 5px;
+    background: #252527; border: 1px solid #3a3a3c; border-radius: 6px; padding: 6px 8px;
+  }
+  .alt-location.open { display: flex; }
+  .alt-input-row { display: flex; align-items: center; gap: 6px; }
+  .alt-input {
+    flex: 1; background: #1e1e1e; border: 1px solid #48484a; border-radius: 4px;
+    color: #e0e0e0; font-size: 11px; font-family: "SF Mono","Menlo",monospace;
+    padding: 3px 6px; outline: none;
+  }
+  .alt-input:focus { border-color: #0a84ff; }
+  .btn-browse { font-size: 10px; background: #3a3a3c; color: #98989d; border: none; border-radius: 4px; padding: 3px 7px; cursor: pointer; font-family: inherit; white-space: nowrap; }
+  .btn-browse:hover { background: #48484a; color: #e0e0e0; }
+  .btn-set { font-size: 10px; background: #1f3a27; color: #30d158; border: none; border-radius: 4px; padding: 3px 7px; cursor: pointer; font-family: inherit; }
+  .btn-cancel-alt { font-size: 10px; background: none; color: #555; border: none; cursor: pointer; font-family: inherit; padding: 3px 2px; }
+
+  /* Path status indicator */
+  .path-status {
+    font-size: 10px; padding: 2px 0 0 2px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .path-status .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .path-status.exists .dot   { background: #30d158; }
+  .path-status.new .dot      { background: #ffd60a; }
+  .path-status.exists span   { color: #30d158; }
+  .path-status.new span      { color: #ffd60a; }
+
+  /* Badge */
+  .badge { font-size: 10px; border-radius: 3px; padding: 1px 4px; font-weight: 600; flex-shrink: 0; }
+  .badge.error   { background: rgba(255,69,58,0.2);  color: #ff453a; }
+  .badge.warning { background: rgba(255,214,10,0.15); color: #ffd60a; }
+
+  /* Dismiss X */
+  .btn-x {
+    font-size: 12px; line-height: 1; background: none; border: none; color: #444;
+    cursor: pointer; padding: 1px 3px; flex-shrink: 0; margin-top: 1px;
+  }
+  .btn-x:hover { color: #98989d; }
+
+  /* ── Tree panel (Finder-style) ── */
+  .tree-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Column headers */
+  .tree-header {
+    display: flex; align-items: center;
+    padding: 4px 16px 4px 16px;
+    border-bottom: 1px solid #3a3a3c;
+    background: #252527;
+    flex-shrink: 0;
+    user-select: none;
+  }
+  .tree-header .col-name { flex: 1; font-size: 11px; font-weight: 600; color: #98989d; min-width: 0; }
+  .tree-header .col-date { width: 170px; font-size: 11px; font-weight: 600; color: #98989d; flex-shrink: 0; padding-left: 8px; }
+  .tree-header .col-size { width: 50px; font-size: 11px; font-weight: 600; color: #98989d; flex-shrink: 0; text-align: right; padding-right: 12px; }
+  .tree-header .col-findings { width: 150px; font-size: 11px; font-weight: 600; color: #98989d; flex-shrink: 0; }
+
+  .tree-scroll { overflow-y: auto; flex: 1; }
+
+  /* Row */
+  .tree-node {
+    display: flex; align-items: center;
+    padding: 2px 16px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: background 0.1s;
+    min-height: 22px;
+  }
+  .tree-node:hover { background: #2a2a2c; }
+  .tree-node.hl-error   { background: #2d1a1a; border-left-color: #ff453a; }
+  .tree-node.hl-warning { background: #2d2700; border-left-color: #ffd60a; }
+
+  /* Name cell */
+  .tree-cell-name {
+    flex: 1; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden;
+  }
+  .tree-indent { display: inline-block; width: 16px; flex-shrink: 0; }
+  .tree-disclosure {
+    width: 14px; flex-shrink: 0; font-size: 9px; color: #636366;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* Folder icon */
+  .folder-icon {
+    font-size: 13px; flex-shrink: 0; margin-right: 4px;
+    filter: hue-rotate(0deg); /* tint handled per class */
+  }
+  .folder-icon.dim { opacity: 0.35; }
+
+  .tree-label {
+    font-size: 12px; color: #e0e0e0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex: 1; min-width: 0;
+  }
+  .tree-label.dim { color: #555; }
+
+  /* Other columns */
+  .tree-cell-date { width: 170px; font-size: 11px; color: #636366; flex-shrink: 0; padding-left: 8px; }
+  .tree-cell-size { width: 50px; font-size: 11px; color: #636366; flex-shrink: 0; text-align: right; padding-right: 12px; }
+  .tree-cell-findings { width: 150px; flex-shrink: 0; display: flex; gap: 3px; flex-wrap: wrap; }
+
+  .ann { font-size: 10px; border-radius: 3px; padding: 1px 5px; font-weight: 500; white-space: nowrap; }
+  .ann-error   { background: rgba(255,69,58,0.2);  color: #ff453a; }
+  .ann-warning { background: rgba(255,214,10,0.15); color: #ffd60a; }
+
+  /* ── Bottom bar ── */
+  .bottom-bar {
+    background: #2c2c2e; border-top: 1px solid #3a3a3c;
+    padding: 8px 16px; display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  }
+  .bottom-status { flex: 1; font-size: 11px; color: #98989d; }
+  .btn-preview {
+    background: #3a3a3c; color: #e0e0e0; border: none; border-radius: 6px;
+    padding: 5px 14px; font-size: 12px; font-family: inherit; cursor: pointer;
+  }
+  .btn-preview:hover { background: #48484a; }
+  .btn-apply {
+    background: #0a84ff; color: #fff; border: none; border-radius: 6px;
+    padding: 5px 14px; font-size: 12px; font-family: inherit;
+    cursor: pointer; opacity: 0.35; pointer-events: none;
+  }
+  .btn-apply.active { opacity: 1; pointer-events: auto; }
+  .btn-apply.active:hover { background: #0070e0; }
+</style>
+</head>
+<body>
+
+<!-- Toolbar -->
+<div class="toolbar">
+  <div class="toolbar-path">Analyzing <span>~/Documents</span></div>
+  <div style="display:flex;gap:8px">
+    <span class="stat-pill red">4 issues</span>
+    <span class="stat-pill yellow">6 warnings</span>
+    <span class="stat-pill gray">312 folders</span>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- ── Findings ── -->
+  <div class="findings-panel">
+    <div class="panel-header">Findings</div>
+    <div class="findings-scroll">
+
+      <!-- Empty Folders -->
+      <div class="finding-group" id="grp-empty">
+        <div class="group-header">
+          <div class="group-dot" style="background:#ff453a"></div>
+          Empty Folders <span class="group-count">2</span>
+          <div class="group-spacer"></div>
+          <label class="group-cb-label">
+            <div class="cb" id="gcb-empty" onclick="toggleGroupCb('empty')"></div> All
+          </label>
+        </div>
+
+        <div class="finding-row" id="row-empty-1" onclick="selectRow(event,this,'empty-1')">
+          <div class="cb" id="cb-empty-1" onclick="toggleCb(event,'empty-1')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge error">empty</span> Archive</div>
+            <div class="finding-path">Old Projects/Archive/</div>
+            <div class="finding-dest">→ Remove folder</div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-empty-1')" title="Dismiss">✕</button>
+        </div>
+
+        <div class="finding-row" id="row-empty-2" onclick="selectRow(event,this,'empty-2')">
+          <div class="cb" id="cb-empty-2" onclick="toggleCb(event,'empty-2')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge error">empty</span> Misc</div>
+            <div class="finding-path">Personal/Misc/</div>
+            <div class="finding-dest">→ Remove folder</div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-empty-2')" title="Dismiss">✕</button>
+        </div>
+      </div>
+
+      <!-- Naming -->
+      <div class="finding-group" id="grp-name">
+        <div class="group-header">
+          <div class="group-dot" style="background:#ff453a"></div>
+          Naming Inconsistency <span class="group-count">2</span>
+          <div class="group-spacer"></div>
+          <label class="group-cb-label">
+            <div class="cb" id="gcb-name" onclick="toggleGroupCb('name')"></div> All
+          </label>
+        </div>
+
+        <div class="finding-row" id="row-name-1" onclick="selectRow(event,this,'name-1')">
+          <div class="cb" id="cb-name-1" onclick="toggleCb(event,'name-1')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge error">naming</span> photoArchive</div>
+            <div class="finding-path">Media/photoArchive/</div>
+            <div class="finding-dest">→ Rename to <span class="dest-value">Photo Archive</span>
+              <span class="dest-override" title="Title Case inferred from 94% of siblings">(why?)</span>
+            </div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-name-1')" title="Dismiss">✕</button>
+        </div>
+
+        <div class="finding-row" id="row-name-2" onclick="selectRow(event,this,'name-2')">
+          <div class="cb" id="cb-name-2" onclick="toggleCb(event,'name-2')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge error">naming</span> old_receipts</div>
+            <div class="finding-path">Finance/old_receipts/</div>
+            <div class="finding-dest">→ Rename to <span class="dest-value">Old Receipts</span>
+              <span class="dest-override" title="Title Case inferred">(why?)</span>
+            </div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-name-2')" title="Dismiss">✕</button>
+        </div>
+      </div>
+
+      <!-- Misplaced Files -->
+      <div class="finding-group" id="grp-misplace">
+        <div class="group-header">
+          <div class="group-dot" style="background:#ffd60a"></div>
+          Misplaced Files <span class="group-count">3</span>
+          <div class="group-spacer"></div>
+          <label class="group-cb-label">
+            <div class="cb" id="gcb-misplace" onclick="toggleGroupCb('misplace')"></div> All
+          </label>
+        </div>
+
+        <div class="finding-row" id="row-misplace-1" onclick="selectRow(event,this,'misplace-1')">
+          <div class="cb" id="cb-misplace-1" onclick="toggleCb(event,'misplace-1')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge warning">misplaced</span> 3 image files in Finance/</div>
+            <div class="finding-path">Finance/ → *.jpg, *.png</div>
+            <div class="finding-dest">
+              → Move to <span class="dest-value" id="dv-misplace-1">Media/Photos/</span>
+              <span class="dest-override" onclick="openAlt(event,'alt-misplace-1')">Choose location…</span>
+            </div>
+            <div class="alt-location" id="alt-misplace-1">
+              <div class="alt-input-row">
+                <input class="alt-input" id="ai-misplace-1" type="text" value="Media/Photos/" oninput="updatePathStatus('misplace-1')">
+                <button class="btn-browse" onclick="event.stopPropagation()">Browse…</button>
+                <button class="btn-set" onclick="setAlt(event,'misplace-1')">Set</button>
+                <button class="btn-cancel-alt" onclick="closeAlt(event,'alt-misplace-1')">Cancel</button>
+              </div>
+              <div class="path-status exists" id="ps-misplace-1">
+                <div class="dot"></div><span>Folder exists</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-misplace-1')" title="Dismiss">✕</button>
+        </div>
+
+        <div class="finding-row" id="row-misplace-2" onclick="selectRow(event,this,'misplace-2')">
+          <div class="cb" id="cb-misplace-2" onclick="toggleCb(event,'misplace-2')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge warning">misplaced</span> invoice_2023.pdf</div>
+            <div class="finding-path">Desktop/invoice_2023.pdf</div>
+            <div class="finding-dest">
+              → Move to <span class="dest-value" id="dv-misplace-2">Finance/Invoices/</span>
+              <span class="dest-override" onclick="openAlt(event,'alt-misplace-2')">Choose location…</span>
+            </div>
+            <div class="alt-location" id="alt-misplace-2">
+              <div class="alt-input-row">
+                <input class="alt-input" id="ai-misplace-2" type="text" value="Finance/Invoices/" oninput="updatePathStatus('misplace-2')">
+                <button class="btn-browse" onclick="event.stopPropagation()">Browse…</button>
+                <button class="btn-set" onclick="setAlt(event,'misplace-2')">Set</button>
+                <button class="btn-cancel-alt" onclick="closeAlt(event,'alt-misplace-2')">Cancel</button>
+              </div>
+              <div class="path-status exists" id="ps-misplace-2">
+                <div class="dot"></div><span>Folder exists</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-misplace-2')" title="Dismiss">✕</button>
+        </div>
+
+        <div class="finding-row" id="row-misplace-3" onclick="selectRow(event,this,'misplace-3')">
+          <div class="cb" id="cb-misplace-3" onclick="toggleCb(event,'misplace-3')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge warning">misplaced</span> resume_v3.docx</div>
+            <div class="finding-path">Downloads/resume_v3.docx</div>
+            <div class="finding-dest">
+              → Move to <span class="dest-value" id="dv-misplace-3">Documents/Career/</span>
+              <span class="dest-override" onclick="openAlt(event,'alt-misplace-3')">Choose location…</span>
+            </div>
+            <div class="alt-location" id="alt-misplace-3">
+              <div class="alt-input-row">
+                <input class="alt-input" id="ai-misplace-3" type="text" value="Documents/Career/" oninput="updatePathStatus('misplace-3')">
+                <button class="btn-browse" onclick="event.stopPropagation()">Browse…</button>
+                <button class="btn-set" onclick="setAlt(event,'misplace-3')">Set</button>
+                <button class="btn-cancel-alt" onclick="closeAlt(event,'alt-misplace-3')">Cancel</button>
+              </div>
+              <div class="path-status new" id="ps-misplace-3">
+                <div class="dot"></div><span>Will be created</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-misplace-3')" title="Dismiss">✕</button>
+        </div>
+      </div>
+
+      <!-- Excessive Nesting -->
+      <div class="finding-group" id="grp-nest">
+        <div class="group-header">
+          <div class="group-dot" style="background:#ffd60a"></div>
+          Excessive Nesting <span class="group-count">1</span>
+          <div class="group-spacer"></div>
+          <label class="group-cb-label">
+            <div class="cb" id="gcb-nest" onclick="toggleGroupCb('nest')"></div> All
+          </label>
+        </div>
+
+        <div class="finding-row" id="row-nest-1" onclick="selectRow(event,this,'nest-1')">
+          <div class="cb" id="cb-nest-1" onclick="toggleCb(event,'nest-1')"></div>
+          <div class="row-content">
+            <div class="finding-title"><span class="badge warning">depth 6</span> Attachments</div>
+            <div class="finding-path">Work/Projects/2022/Q3/Reports/Attachments/</div>
+            <div class="finding-dest">
+              → Move to <span class="dest-value" id="dv-nest-1">Work/Projects/2022/</span>
+              <span class="dest-override" onclick="openAlt(event,'alt-nest-1')">Choose location…</span>
+            </div>
+            <div class="alt-location" id="alt-nest-1">
+              <div class="alt-input-row">
+                <input class="alt-input" id="ai-nest-1" type="text" value="Work/Projects/2022/" oninput="updatePathStatus('nest-1')">
+                <button class="btn-browse" onclick="event.stopPropagation()">Browse…</button>
+                <button class="btn-set" onclick="setAlt(event,'nest-1')">Set</button>
+                <button class="btn-cancel-alt" onclick="closeAlt(event,'alt-nest-1')">Cancel</button>
+              </div>
+              <div class="path-status exists" id="ps-nest-1">
+                <div class="dot"></div><span>Folder exists</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn-x" onclick="dismiss(event,'row-nest-1')" title="Dismiss">✕</button>
+        </div>
+      </div>
+
+    </div><!-- findings-scroll -->
+  </div><!-- findings-panel -->
+
+  <!-- ── Tree ── -->
+  <div class="tree-panel">
+    <div class="tree-header">
+      <div class="col-name" style="padding-left:30px">Name</div>
+      <div class="col-date">Date Modified</div>
+      <div class="col-size">Size</div>
+      <div class="col-findings">Findings</div>
+    </div>
+    <div class="tree-scroll">
+
+      <!-- Documents (root) -->
+      <div class="tree-node" onclick="selectFromTree('empty-2',this)">
+        <div class="tree-cell-name">
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Documents</span>
+        </div>
+        <div class="tree-cell-date">Mar 28, 2026, 9:00 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"></div>
+      </div>
+
+      <!-- Desktop -->
+      <div class="tree-node" onclick="selectFromTree('misplace-2',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▶</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Desktop</span>
+        </div>
+        <div class="tree-cell-date">Mar 28, 2026, 8:14 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-warning">1 misplaced</span></div>
+      </div>
+
+      <!-- Downloads -->
+      <div class="tree-node" onclick="selectFromTree('misplace-3',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▶</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Downloads</span>
+        </div>
+        <div class="tree-cell-date">Mar 27, 2026, 4:52 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-warning">1 misplaced</span></div>
+      </div>
+
+      <!-- Finance -->
+      <div class="tree-node" onclick="selectFromTree('misplace-1',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Finance</span>
+        </div>
+        <div class="tree-cell-date">Mar 20, 2026, 11:30 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings">
+          <span class="ann ann-warning">3 misplaced</span>
+          <span class="ann ann-error">naming ↓</span>
+        </div>
+      </div>
+
+      <!-- old_receipts -->
+      <div class="tree-node" onclick="selectFromTree('name-2',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span><span class="tree-indent"></span>
+          <span class="tree-disclosure">▶</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">old_receipts</span>
+        </div>
+        <div class="tree-cell-date">Jan 4, 2026, 2:10 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-error">naming</span></div>
+      </div>
+
+      <!-- Media -->
+      <div class="tree-node">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Media</span>
+        </div>
+        <div class="tree-cell-date">Feb 14, 2026, 6:45 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"></div>
+      </div>
+
+      <!-- photoArchive -->
+      <div class="tree-node" onclick="selectFromTree('name-1',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span><span class="tree-indent"></span>
+          <span class="tree-disclosure">▶</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">photoArchive</span>
+        </div>
+        <div class="tree-cell-date">Feb 14, 2026, 6:45 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-error">naming</span></div>
+      </div>
+
+      <!-- Old Projects -->
+      <div class="tree-node" onclick="selectFromTree('empty-1',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Old Projects</span>
+        </div>
+        <div class="tree-cell-date">Nov 3, 2024, 10:00 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-error">empty ↓</span></div>
+      </div>
+
+      <!-- Archive (empty) -->
+      <div class="tree-node" onclick="selectFromTree('empty-1',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span><span class="tree-indent"></span>
+          <span class="tree-disclosure" style="color:#3a3a3c">▶</span>
+          <span class="folder-icon dim">🗂</span>
+          <span class="tree-label dim">Archive</span>
+        </div>
+        <div class="tree-cell-date">Nov 3, 2024, 10:00 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-error">empty</span></div>
+      </div>
+
+      <!-- Personal -->
+      <div class="tree-node" onclick="selectFromTree('empty-2',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Personal</span>
+        </div>
+        <div class="tree-cell-date">Mar 1, 2026, 3:20 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-error">empty ↓</span></div>
+      </div>
+
+      <!-- Misc (empty) -->
+      <div class="tree-node" onclick="selectFromTree('empty-2',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span><span class="tree-indent"></span>
+          <span class="tree-disclosure" style="color:#3a3a3c">▶</span>
+          <span class="folder-icon dim">🗂</span>
+          <span class="tree-label dim">Misc</span>
+        </div>
+        <div class="tree-cell-date">Mar 1, 2026, 3:20 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-error">empty</span></div>
+      </div>
+
+      <!-- Work -->
+      <div class="tree-node">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Work</span>
+        </div>
+        <div class="tree-cell-date">Mar 28, 2026, 9:15 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"></div>
+      </div>
+
+      <!-- Projects -->
+      <div class="tree-node">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span><span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">Projects</span>
+        </div>
+        <div class="tree-cell-date">Mar 28, 2026, 9:15 AM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"></div>
+      </div>
+
+      <!-- Deep nesting -->
+      <div class="tree-node" onclick="selectFromTree('nest-1',this)">
+        <div class="tree-cell-name">
+          <span class="tree-indent"></span><span class="tree-indent"></span><span class="tree-indent"></span>
+          <span class="tree-disclosure">▼</span>
+          <span class="folder-icon">🗂</span>
+          <span class="tree-label">2022 / Q3 / Reports / …</span>
+        </div>
+        <div class="tree-cell-date">Oct 15, 2022, 2:30 PM</div>
+        <div class="tree-cell-size">—</div>
+        <div class="tree-cell-findings"><span class="ann ann-warning">depth 6</span></div>
+      </div>
+
+    </div>
+  </div>
+
+</div><!-- main -->
+
+<div class="bottom-bar">
+  <div class="bottom-status" id="status">8 findings · 0 selected</div>
+  <button class="btn-preview">Preview Changes</button>
+  <button class="btn-apply" id="apply-btn">Apply Selected</button>
+</div>
+
+<script>
+  // Track which row IDs are checked
+  const checked = new Set();
+
+  // Map row IDs → group prefix
+  const rowGroup = {
+    'empty-1':'empty','empty-2':'empty',
+    'name-1':'name','name-2':'name',
+    'misplace-1':'misplace','misplace-2':'misplace','misplace-3':'misplace',
+    'nest-1':'nest'
+  };
+
+  // All row IDs per group
+  const groupRows = {
+    empty: ['empty-1','empty-2'],
+    name:  ['name-1','name-2'],
+    misplace: ['misplace-1','misplace-2','misplace-3'],
+    nest:  ['nest-1']
+  };
+
+  function isVisible(id) {
+    return document.getElementById('row-' + id)?.style.display !== 'none';
+  }
+
+  function setCb(id, on) {
+    const el = document.getElementById('cb-' + id);
+    if (!el) return;
+    el.classList.toggle('checked', on);
+    if (on) checked.add(id); else checked.delete(id);
+  }
+
+  function toggleCb(evt, id) {
+    evt.stopPropagation();
+    const on = !checked.has(id);
+    setCb(id, on);
+    syncGroupCb(rowGroup[id]);
+    updateStatus();
+  }
+
+  function toggleGroupCb(grp) {
+    const rows = groupRows[grp].filter(isVisible);
+    const allChecked = rows.every(id => checked.has(id));
+    rows.forEach(id => setCb(id, !allChecked));
+    const gcb = document.getElementById('gcb-' + grp);
+    gcb.classList.toggle('checked', !allChecked);
+    gcb.classList.remove('indeterminate');
+    updateStatus();
+  }
+
+  function syncGroupCb(grp) {
+    const rows = groupRows[grp].filter(isVisible);
+    const n = rows.filter(id => checked.has(id)).length;
+    const gcb = document.getElementById('gcb-' + grp);
+    gcb.classList.remove('checked','indeterminate');
+    if (n === rows.length && n > 0) gcb.classList.add('checked');
+    else if (n > 0) gcb.classList.add('indeterminate');
+  }
+
+  function updateStatus() {
+    const n = checked.size;
+    document.getElementById('status').textContent =
+      `${document.querySelectorAll('.finding-row:not([style*="none"])').length} findings · ${n} selected`;
+    const btn = document.getElementById('apply-btn');
+    btn.classList.toggle('active', n > 0);
+    btn.textContent = n > 0 ? `Apply ${n} Selected` : 'Apply Selected';
+  }
+
+  let selectedId = null;
+
+  function selectRow(evt, row, id) {
+    if (evt.target.classList.contains('cb') || evt.target.tagName === 'BUTTON' ||
+        evt.target.tagName === 'INPUT' || evt.target.classList.contains('dest-override')) return;
+    document.querySelectorAll('.finding-row').forEach(r => r.classList.remove('selected'));
+    row.classList.add('selected');
+    selectedId = id;
+    highlightTree(id);
+  }
+
+  function selectFromTree(id, node) {
+    const row = document.getElementById('row-' + id);
+    if (!row || row.style.display === 'none') return;
+    document.querySelectorAll('.finding-row').forEach(r => r.classList.remove('selected'));
+    row.classList.add('selected');
+    row.scrollIntoView({ behavior:'smooth', block:'nearest' });
+    selectedId = id;
+    highlightTree(id);
+  }
+
+  function highlightTree(id) {
+    document.querySelectorAll('.tree-node').forEach(n =>
+      n.classList.remove('hl-error','hl-warning','hl-selected'));
+    // highlight nodes that reference this finding
+    document.querySelectorAll('.tree-node').forEach(n => {
+      if (n.getAttribute('onclick')?.includes(`'${id}'`)) {
+        const isErr = id.startsWith('empty') || id.startsWith('name');
+        n.classList.add(isErr ? 'hl-error' : 'hl-warning');
+      }
+    });
+  }
+
+  function dismiss(evt, rowId) {
+    evt.stopPropagation();
+    const row = document.getElementById(rowId);
+    const id = rowId.replace('row-','');
+    row.style.display = 'none';
+    checked.delete(id);
+    syncGroupCb(rowGroup[id]);
+    updateStatus();
+  }
+
+  // Simulate known existing paths (in real app, Rust would answer this)
+  const existingPaths = new Set([
+    'Media/Photos/', 'Finance/Invoices/', 'Finance/', 'Work/Projects/2022/',
+    'Media/', 'Work/', 'Work/Projects/', 'Old Projects/', 'Personal/', 'Downloads/', 'Desktop/'
+  ]);
+
+  function updatePathStatus(id) {
+    const val = document.getElementById('ai-' + id).value.trim();
+    const ps = document.getElementById('ps-' + id);
+    if (!ps) return;
+    const exists = existingPaths.has(val);
+    ps.className = 'path-status ' + (exists ? 'exists' : 'new');
+    ps.querySelector('span').textContent = exists ? 'Folder exists' : 'Will be created';
+  }
+
+  function openAlt(evt, altId) {
+    evt.stopPropagation();
+    document.getElementById(altId).classList.add('open');
+  }
+  function closeAlt(evt, altId) {
+    evt.stopPropagation();
+    document.getElementById(altId).classList.remove('open');
+  }
+  function setAlt(evt, id) {
+    evt.stopPropagation();
+    const val = document.getElementById('ai-' + id).value;
+    document.getElementById('dv-' + id).textContent = val;
+    document.getElementById('alt-' + id).classList.remove('open');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,1350 @@
+/// Directory rationalization engine — Iteration 3.
+///
+/// Scans a folder tree, generates structural findings (empty folders,
+/// naming inconsistencies, misplaced files, excessive nesting), then reads
+/// an execution plan from stdin and applies the approved actions.
+///
+/// All output is newline-delimited JSON to stdout. All filesystem operations
+/// (rename, move, quarantine) are performed here — Flutter never touches
+/// the filesystem directly.
+
+use crate::convention::{classify_convention, dominant_convention, suggest_rename, NamingConvention};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Files treated as system metadata — excluded from real file counts.
+const METADATA_FILES: &[&str] = &[".DS_Store", ".localized", "Thumbs.db"];
+
+/// Folder depth threshold. Folders deeper than this are flagged.
+const NESTING_DEPTH_THRESHOLD: usize = 5;
+
+// ---------------------------------------------------------------------------
+// Internal scan model
+// ---------------------------------------------------------------------------
+
+struct FileInfo {
+    name: String,
+    relative_path: String,
+    absolute_path: PathBuf,
+    extension: String,
+}
+
+struct FolderNode {
+    name: String,
+    /// Relative to the selected root. Empty string for the root itself.
+    relative_path: String,
+    absolute_path: PathBuf,
+    /// 0 = selected root itself.
+    depth: usize,
+    /// Relative path of the direct parent. None for root.
+    parent_relative_path: Option<String>,
+    /// Files excluding system metadata files.
+    real_file_count: usize,
+    child_folder_count: usize,
+    /// Direct (non-recursive) files, for misplaced-file detection.
+    direct_files: Vec<FileInfo>,
+}
+
+fn is_metadata_file(name: &str) -> bool {
+    METADATA_FILES.contains(&name)
+}
+
+// ---------------------------------------------------------------------------
+// JSON output structures (Rust → Flutter)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ProgressEvent<'a> {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    folders_scanned: usize,
+    current_path: &'a str,
+}
+
+#[derive(Serialize)]
+pub struct Finding {
+    pub id: String,
+    pub finding_type: String,
+    pub severity: String,
+    pub path: String,
+    pub absolute_path: String,
+    pub display_name: String,
+    pub action: String,
+    pub destination: Option<String>,
+    pub absolute_destination: Option<String>,
+    pub inference_basis: String,
+    pub triggered_by: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ScanError {
+    path: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct FindingsPayload {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    selected_folder: String,
+    scanned_at: String,
+    total_folders: usize,
+    findings: Vec<Finding>,
+    errors: Vec<ScanError>,
+}
+
+// ---------------------------------------------------------------------------
+// JSON input structures (Flutter → Rust)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExecutionPlan {
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    event_type: String,
+    selected_folder: String,
+    session_id: String,
+    actions: Vec<ExecutionAction>,
+}
+
+#[derive(Deserialize)]
+struct ExecutionAction {
+    finding_id: String,
+    action: String,
+    absolute_path: String,
+    absolute_destination: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Execution result structures (Rust → Flutter)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+struct ExecutionEntry {
+    finding_id: String,
+    action: String,
+    absolute_path: String,
+    absolute_destination: String,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExecutionResult {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    session_id: String,
+    total: usize,
+    succeeded: usize,
+    skipped: usize,
+    failed: usize,
+    log_path: String,
+    quarantine_path: String,
+    entries: Vec<ExecutionEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// R6 — Progress streaming
+// ---------------------------------------------------------------------------
+
+fn emit_json<T: Serialize>(value: &T) {
+    if let Ok(json) = serde_json::to_string(value) {
+        println!("{}", json);
+        io::stdout().flush().ok();
+    }
+}
+
+fn emit_scan_progress(folders_scanned: usize, current_path: &str) {
+    emit_json(&ProgressEvent {
+        event_type: "progress",
+        folders_scanned,
+        current_path,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// R2 — Structural metadata collector
+// ---------------------------------------------------------------------------
+
+fn scan_directory(
+    root: &Path,
+    current: &Path,
+    depth: usize,
+    folders: &mut Vec<FolderNode>,
+    errors: &mut Vec<ScanError>,
+) {
+    let read_dir = match fs::read_dir(current) {
+        Ok(rd) => rd,
+        Err(e) => {
+            errors.push(ScanError {
+                path: current.to_string_lossy().into_owned(),
+                message: e.to_string(),
+            });
+            return;
+        }
+    };
+
+    let relative_path = current
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let name = if depth == 0 {
+        current
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        current
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+
+    let parent_relative_path = if depth == 0 {
+        None
+    } else {
+        current
+            .parent()
+            .and_then(|p| p.strip_prefix(root).ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    };
+
+    let mut real_file_count = 0usize;
+    let mut child_folder_count = 0usize;
+    let mut direct_files: Vec<FileInfo> = Vec::new();
+    let mut child_dirs: Vec<PathBuf> = Vec::new();
+
+    for entry_result in read_dir {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(ScanError {
+                    path: current.to_string_lossy().into_owned(),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        let entry_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                errors.push(ScanError {
+                    path: path.to_string_lossy().into_owned(),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        if metadata.is_dir() {
+            child_folder_count += 1;
+            child_dirs.push(path);
+        } else if metadata.is_file() {
+            if !is_metadata_file(&entry_name) {
+                real_file_count += 1;
+            }
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let file_relative = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            direct_files.push(FileInfo {
+                name: entry_name,
+                relative_path: file_relative,
+                absolute_path: path,
+                extension: ext,
+            });
+        }
+    }
+
+    // Emit progress for this folder before recursing.
+    emit_scan_progress(folders.len() + 1, &relative_path);
+
+    folders.push(FolderNode {
+        name,
+        relative_path,
+        absolute_path: current.to_path_buf(),
+        depth,
+        parent_relative_path,
+        real_file_count,
+        child_folder_count,
+        direct_files,
+    });
+
+    for child_dir in child_dirs {
+        scan_directory(root, &child_dir, depth + 1, folders, errors);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R4 — Finding generator
+// ---------------------------------------------------------------------------
+
+fn convention_display(c: NamingConvention) -> &'static str {
+    match c {
+        NamingConvention::TitleCase => "Title Case",
+        NamingConvention::SnakeCase => "snake_case",
+        NamingConvention::CamelCase => "camelCase",
+        NamingConvention::KebabCase => "kebab-case",
+        NamingConvention::LowerCase => "lowercase",
+        NamingConvention::Unknown => "unknown",
+    }
+}
+
+/// Propose a destination for a folder that exceeds the nesting threshold.
+/// Moves the folder to be a direct child of the ancestor at depth `threshold`,
+/// making it land at depth `threshold + 1`... actually we want it AT `threshold`.
+/// So we place it under the ancestor at depth `threshold - 1`.
+fn compute_flatten_destination(
+    root: &Path,
+    folder_path: &Path,
+    threshold: usize,
+) -> Option<(String, String)> {
+    let relative = folder_path.strip_prefix(root).ok()?;
+    let components: Vec<_> = relative.components().collect();
+    // depth = number of path components relative to root
+    let depth = components.len();
+    if depth <= threshold {
+        return None;
+    }
+    // Ancestor at depth (threshold - 1) has that many components
+    let ancestor_component_count = threshold.saturating_sub(1);
+    let ancestor_rel: PathBuf = components[..ancestor_component_count].iter().collect();
+    let folder_name = folder_path.file_name()?;
+    let dest_rel = ancestor_rel.join(folder_name);
+    let dest_abs = root.join(&dest_rel);
+    Some((
+        dest_rel.to_string_lossy().into_owned(),
+        dest_abs.to_string_lossy().into_owned(),
+    ))
+}
+
+/// Generate misplaced-file findings.
+/// An extension is considered to "belong" to a top-level subtree when ≥ 90%
+/// of files with that extension appear under it. Files outside that canonical
+/// subtree are flagged. Requires at least 4 data points before inferring.
+fn generate_misplaced_file_findings(
+    root: &Path,
+    folders: &[FolderNode],
+    id_counter: &mut usize,
+) -> Vec<Finding> {
+    // ext → Vec<(rel_path, abs_path, top_level_ancestor_name)>
+    let mut ext_locs: HashMap<&str, Vec<(&str, &Path, &str)>> = HashMap::new();
+
+    for folder in folders {
+        let top_ancestor = if folder.depth == 0 {
+            // Files directly in the root — no top-level ancestor
+            ""
+        } else {
+            // First path component of relative_path is the depth-1 folder name
+            folder
+                .relative_path
+                .split('/')
+                .next()
+                .unwrap_or("")
+        };
+
+        for file in &folder.direct_files {
+            if file.extension.is_empty() {
+                continue;
+            }
+            ext_locs
+                .entry(&file.extension)
+                .or_default()
+                .push((&file.relative_path, &file.absolute_path, top_ancestor));
+        }
+    }
+
+    let mut findings = Vec::new();
+
+    for (ext, locations) in &ext_locs {
+        if locations.len() < 4 {
+            continue;
+        }
+
+        // Count per top-level ancestor
+        let mut ancestor_counts: HashMap<&str, usize> = HashMap::new();
+        for (_, _, ancestor) in locations {
+            *ancestor_counts.entry(ancestor).or_default() += 1;
+        }
+
+        let total = locations.len();
+        let dominant = ancestor_counts
+            .iter()
+            .find(|&(_, &count)| count * 100 / total >= 90)
+            .map(|(&name, &count)| (name, count));
+
+        let Some((canonical, canonical_count)) = dominant else {
+            continue;
+        };
+
+        if canonical.is_empty() {
+            // Files are in root — no meaningful subtree to propose
+            continue;
+        }
+
+        for (rel_path, abs_path, ancestor) in locations {
+            if *ancestor != canonical {
+                *id_counter += 1;
+                let id = format!("f{}", id_counter);
+                let file_name = abs_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let dest_rel = format!("{}/{}", canonical, file_name);
+                let dest_abs = root.join(&dest_rel);
+
+                findings.push(Finding {
+                    id,
+                    finding_type: "misplaced_file".to_string(),
+                    severity: "warning".to_string(),
+                    path: rel_path.to_string(),
+                    absolute_path: abs_path.to_string_lossy().into_owned(),
+                    display_name: file_name,
+                    action: "move".to_string(),
+                    destination: Some(dest_rel),
+                    absolute_destination: Some(dest_abs.to_string_lossy().into_owned()),
+                    inference_basis: format!(
+                        ".{} files appear in {}/{} cases under {}/",
+                        ext, canonical_count, total, canonical
+                    ),
+                    triggered_by: None,
+                });
+            }
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// R5 — Dependency chaining (one-level cascade)
+// ---------------------------------------------------------------------------
+
+/// For each empty_folder finding, check if removing it would make its direct
+/// parent empty. If so, surface the parent as a dependent finding.
+/// Only one level of cascade — re-scan handles the rest.
+fn generate_cascade_findings(
+    folders: &[FolderNode],
+    empty_folder_ids: &HashMap<String, String>,
+    id_counter: &mut usize,
+) -> Vec<Finding> {
+    let folder_map: HashMap<&str, &FolderNode> = folders
+        .iter()
+        .map(|f| (f.relative_path.as_str(), f))
+        .collect();
+
+    // For each parent: how many of its direct subfolders are flagged as empty?
+    let mut parent_flagged_count: HashMap<String, usize> = HashMap::new();
+    for rel_path in empty_folder_ids.keys() {
+        if let Some(f) = folder_map.get(rel_path.as_str()) {
+            if let Some(parent_key) = &f.parent_relative_path {
+                *parent_flagged_count.entry(parent_key.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    let mut cascade = Vec::new();
+
+    for (parent_rel, flagged_count) in &parent_flagged_count {
+        let Some(parent) = folder_map.get(parent_rel.as_str()) else {
+            continue;
+        };
+        if parent.depth == 0 {
+            continue; // Never cascade to the selected root
+        }
+        // Parent would become empty if all child folders are being removed and
+        // it has no real files of its own — and it isn't already flagged independently.
+        let would_become_empty = parent.real_file_count == 0
+            && *flagged_count >= parent.child_folder_count
+            && parent.child_folder_count > 0;
+
+        if would_become_empty && !empty_folder_ids.contains_key(parent_rel.as_str()) {
+            // Pick the first triggering child as the `triggered_by` reference.
+            let triggering_id = empty_folder_ids
+                .iter()
+                .find(|(rel, _)| {
+                    folder_map
+                        .get(rel.as_str())
+                        .and_then(|f| f.parent_relative_path.as_deref())
+                        == Some(parent_rel)
+                })
+                .map(|(_, id)| id.clone());
+
+            let Some(triggered_by) = triggering_id else {
+                continue;
+            };
+
+            // Find the name of any triggering child for the inference_basis message.
+            let child_name = empty_folder_ids
+                .keys()
+                .find(|rel| {
+                    folder_map
+                        .get(rel.as_str())
+                        .and_then(|f| f.parent_relative_path.as_deref())
+                        == Some(parent_rel)
+                })
+                .and_then(|rel| folder_map.get(rel.as_str()))
+                .map(|f| f.name.as_str())
+                .unwrap_or("child folder");
+
+            *id_counter += 1;
+            let id = format!("f{}", id_counter);
+
+            cascade.push(Finding {
+                id,
+                finding_type: "empty_folder".to_string(),
+                severity: "issue".to_string(),
+                path: parent.relative_path.clone(),
+                absolute_path: parent.absolute_path.to_string_lossy().into_owned(),
+                display_name: parent.name.clone(),
+                action: "remove".to_string(),
+                destination: None,
+                absolute_destination: None,
+                inference_basis: format!(
+                    "Will become empty if {} is removed",
+                    child_name
+                ),
+                triggered_by: Some(triggered_by),
+            });
+        }
+    }
+
+    cascade
+}
+
+fn generate_findings(root: &Path, folders: &[FolderNode]) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut id_counter = 0usize;
+
+    // Build sibling groups: parent_relative_path → Vec<&folder_name>
+    let mut sibling_groups: HashMap<String, Vec<&str>> = HashMap::new();
+    for folder in folders {
+        if folder.depth == 0 {
+            continue;
+        }
+        let parent_key = folder
+            .parent_relative_path
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        sibling_groups
+            .entry(parent_key)
+            .or_default()
+            .push(&folder.name);
+    }
+
+    // Compute dominant convention per sibling group (90% threshold, 3 min samples).
+    let dominant_by_parent: HashMap<String, NamingConvention> = sibling_groups
+        .iter()
+        .filter_map(|(parent, names)| {
+            let dom = dominant_convention(names, 0.9, 3)?;
+            Some((parent.clone(), dom))
+        })
+        .collect();
+
+    // Tracks empty_folder findings: relative_path → finding_id
+    // Used for cascade detection (R5).
+    let mut empty_folder_ids: HashMap<String, String> = HashMap::new();
+
+    for folder in folders {
+        if folder.depth == 0 {
+            continue; // Never flag the root itself
+        }
+
+        // ── empty_folder ──────────────────────────────────────────────────
+        let is_empty = folder.real_file_count == 0 && folder.child_folder_count == 0;
+        if is_empty {
+            id_counter += 1;
+            let id = format!("f{}", id_counter);
+            empty_folder_ids.insert(folder.relative_path.clone(), id.clone());
+            findings.push(Finding {
+                id,
+                finding_type: "empty_folder".to_string(),
+                severity: "issue".to_string(),
+                path: folder.relative_path.clone(),
+                absolute_path: folder.absolute_path.to_string_lossy().into_owned(),
+                display_name: folder.name.clone(),
+                action: "remove".to_string(),
+                destination: None,
+                absolute_destination: None,
+                inference_basis: "Folder contains no files".to_string(),
+                triggered_by: None,
+            });
+        }
+
+        // ── excessive_nesting ─────────────────────────────────────────────
+        if folder.depth > NESTING_DEPTH_THRESHOLD {
+            let dest = compute_flatten_destination(root, &folder.absolute_path, NESTING_DEPTH_THRESHOLD);
+            id_counter += 1;
+            let id = format!("f{}", id_counter);
+            findings.push(Finding {
+                id,
+                finding_type: "excessive_nesting".to_string(),
+                severity: "warning".to_string(),
+                path: folder.relative_path.clone(),
+                absolute_path: folder.absolute_path.to_string_lossy().into_owned(),
+                display_name: folder.name.clone(),
+                action: "move".to_string(),
+                destination: dest.as_ref().map(|(rel, _)| rel.clone()),
+                absolute_destination: dest.as_ref().map(|(_, abs)| abs.clone()),
+                inference_basis: format!(
+                    "Folder depth is {}; threshold is {}",
+                    folder.depth, NESTING_DEPTH_THRESHOLD
+                ),
+                triggered_by: None,
+            });
+        }
+
+        // ── naming_inconsistency ──────────────────────────────────────────
+        // Only when the folder has no other findings (already flagged empty folders
+        // don't need a rename proposal too).
+        if !is_empty {
+            if let Some(parent_key) = &folder.parent_relative_path {
+                if let Some(&dominant) = dominant_by_parent.get(parent_key) {
+                    if let Some(renamed) = suggest_rename(&folder.name, dominant) {
+                        let dest_rel = if parent_key.is_empty() {
+                            renamed.clone()
+                        } else {
+                            format!("{}/{}", parent_key, renamed)
+                        };
+                        let dest_abs = root.join(&dest_rel);
+
+                        // Compute actual percentage for the inference_basis string.
+                        let pct = sibling_groups
+                            .get(parent_key)
+                            .map(|siblings| {
+                                let matching = siblings
+                                    .iter()
+                                    .filter(|&&n| classify_convention(n) == dominant)
+                                    .count();
+                                if siblings.is_empty() {
+                                    0
+                                } else {
+                                    matching * 100 / siblings.len()
+                                }
+                            })
+                            .unwrap_or(90);
+
+                        id_counter += 1;
+                        let id = format!("f{}", id_counter);
+                        findings.push(Finding {
+                            id,
+                            finding_type: "naming_inconsistency".to_string(),
+                            severity: "issue".to_string(),
+                            path: folder.relative_path.clone(),
+                            absolute_path: folder.absolute_path.to_string_lossy().into_owned(),
+                            display_name: folder.name.clone(),
+                            action: "rename".to_string(),
+                            destination: Some(dest_rel),
+                            absolute_destination: Some(dest_abs.to_string_lossy().into_owned()),
+                            inference_basis: format!(
+                                "{} used by {}% of sibling folders",
+                                convention_display(dominant),
+                                pct
+                            ),
+                            triggered_by: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // ── misplaced_file ────────────────────────────────────────────────────
+    let misplaced = generate_misplaced_file_findings(root, folders, &mut id_counter);
+    findings.extend(misplaced);
+
+    // ── cascade (R5) ──────────────────────────────────────────────────────
+    let cascade = generate_cascade_findings(folders, &empty_folder_ids, &mut id_counter);
+    findings.extend(cascade);
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// R7 — Findings JSON output
+// ---------------------------------------------------------------------------
+
+fn current_timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    unix_secs_to_iso8601(secs)
+}
+
+fn unix_secs_to_iso8601(secs: u64) -> String {
+    let sec = (secs % 60) as u32;
+    let min = ((secs / 60) % 60) as u32;
+    let hour = ((secs / 3600) % 24) as u32;
+    let days = (secs / 86400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
+}
+
+/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
+/// Uses Howard Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era: i64 = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+// ---------------------------------------------------------------------------
+// R8 — Execution engine
+// ---------------------------------------------------------------------------
+
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+
+fn quarantine_base() -> PathBuf {
+    home_dir().join(".filesteward").join("quarantine")
+}
+
+fn logs_base() -> PathBuf {
+    home_dir().join(".filesteward").join("logs")
+}
+
+fn execute_plan(
+    plan: &ExecutionPlan,
+    findings: &[Finding],
+) -> ExecutionResult {
+    let session_id = &plan.session_id;
+    let quarantine_session = quarantine_base().join(session_id);
+    let log_path = logs_base().join(format!("{}.json", session_id));
+    let selected_root = Path::new(&plan.selected_folder);
+
+    // Pre-create quarantine and log directories (non-fatal on failure).
+    let _ = fs::create_dir_all(&quarantine_session);
+    let _ = fs::create_dir_all(logs_base());
+
+    // Build a quick lookup: finding_id → Finding (for display_name etc.)
+    let findings_by_id: HashMap<&str, &Finding> = findings
+        .iter()
+        .map(|f| (f.id.as_str(), f))
+        .collect();
+
+    let mut entries: Vec<ExecutionEntry> = Vec::new();
+    let mut succeeded = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for action in &plan.actions {
+        let src = Path::new(&action.absolute_path);
+
+        let (outcome, error, actual_dest) = match action.action.as_str() {
+            "remove" => execute_remove(src, selected_root, &quarantine_session),
+            "rename" | "move" => {
+                let dest_str = action.absolute_destination.as_deref().unwrap_or("");
+                if dest_str.is_empty() {
+                    (
+                        "failed".to_string(),
+                        Some("No destination specified".to_string()),
+                        dest_str.to_string(),
+                    )
+                } else {
+                    execute_move(src, Path::new(dest_str))
+                }
+            }
+            other => (
+                "skipped".to_string(),
+                Some(format!("Unknown action: {}", other)),
+                String::new(),
+            ),
+        };
+
+        match outcome.as_str() {
+            "succeeded" => succeeded += 1,
+            "skipped" => skipped += 1,
+            _ => failed += 1,
+        }
+
+        entries.push(ExecutionEntry {
+            finding_id: action.finding_id.clone(),
+            action: action.action.clone(),
+            absolute_path: action.absolute_path.clone(),
+            absolute_destination: actual_dest,
+            outcome,
+            error,
+        });
+
+        // Suppress unused variable warning when finding is not in the map.
+        let _ = findings_by_id.get(action.finding_id.as_str());
+    }
+
+    let result = ExecutionResult {
+        event_type: "execution_result",
+        session_id: session_id.clone(),
+        total: plan.actions.len(),
+        succeeded,
+        skipped,
+        failed,
+        log_path: log_path.to_string_lossy().into_owned(),
+        quarantine_path: quarantine_session.to_string_lossy().into_owned(),
+        entries,
+    };
+
+    // R9 — Write execution log
+    write_execution_log(&log_path, &result);
+
+    result
+}
+
+/// Move `src` into `quarantine_session`, preserving its path relative to `selected_root`.
+fn execute_remove(
+    src: &Path,
+    selected_root: &Path,
+    quarantine_session: &Path,
+) -> (String, Option<String>, String) {
+    let relative = match src.strip_prefix(selected_root) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                "failed".to_string(),
+                Some("Path is not inside selected folder".to_string()),
+                String::new(),
+            )
+        }
+    };
+
+    if !src.exists() {
+        return (
+            "skipped".to_string(),
+            Some("Source does not exist".to_string()),
+            String::new(),
+        );
+    }
+
+    let dest = quarantine_session.join(relative);
+
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return (
+                "failed".to_string(),
+                Some(format!("Could not create quarantine directory: {}", e)),
+                dest.to_string_lossy().into_owned(),
+            );
+        }
+    }
+
+    if dest.exists() {
+        return (
+            "failed".to_string(),
+            Some("Quarantine destination already exists".to_string()),
+            dest.to_string_lossy().into_owned(),
+        );
+    }
+
+    match fs::rename(src, &dest) {
+        Ok(()) => ("succeeded".to_string(), None, dest.to_string_lossy().into_owned()),
+        Err(e) => (
+            "failed".to_string(),
+            Some(e.to_string()),
+            dest.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
+/// Rename or move `src` to `dest`. Creates destination parent directories.
+fn execute_move(src: &Path, dest: &Path) -> (String, Option<String>, String) {
+    if !src.exists() {
+        return (
+            "skipped".to_string(),
+            Some("Source does not exist".to_string()),
+            dest.to_string_lossy().into_owned(),
+        );
+    }
+
+    if dest.exists() {
+        return (
+            "failed".to_string(),
+            Some("Destination already exists".to_string()),
+            dest.to_string_lossy().into_owned(),
+        );
+    }
+
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return (
+                "failed".to_string(),
+                Some(format!("Could not create destination directory: {}", e)),
+                dest.to_string_lossy().into_owned(),
+            );
+        }
+    }
+
+    match fs::rename(src, dest) {
+        Ok(()) => ("succeeded".to_string(), None, dest.to_string_lossy().into_owned()),
+        Err(e) => (
+            "failed".to_string(),
+            Some(e.to_string()),
+            dest.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R9 — Execution log
+// ---------------------------------------------------------------------------
+
+fn write_execution_log(log_path: &Path, result: &ExecutionResult) {
+    if let Ok(json) = serde_json::to_string_pretty(result) {
+        let _ = fs::write(log_path, json);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R1 — Public entry point (called from main.rs)
+// ---------------------------------------------------------------------------
+
+/// Run the rationalize pipeline for `folder_path`.
+/// Scans, emits progress + findings, reads execution plan from stdin, executes.
+pub fn run(folder_path: &str) {
+    let root = Path::new(folder_path);
+
+    if !root.exists() || !root.is_dir() {
+        let payload = FindingsPayload {
+            event_type: "findings",
+            selected_folder: folder_path.to_string(),
+            scanned_at: current_timestamp(),
+            total_folders: 0,
+            findings: vec![],
+            errors: vec![ScanError {
+                path: folder_path.to_string(),
+                message: "Path does not exist or is not a directory".to_string(),
+            }],
+        };
+        emit_json(&payload);
+        return;
+    }
+
+    let mut folders: Vec<FolderNode> = Vec::new();
+    let mut errors: Vec<ScanError> = Vec::new();
+
+    // R2 — collect structural metadata (also handles R6 progress events)
+    scan_directory(root, root, 0, &mut folders, &mut errors);
+
+    let total_folders = folders.len();
+    let scanned_at = current_timestamp();
+
+    // R4 + R5 — generate findings
+    let findings = generate_findings(root, &folders);
+
+    // R7 — emit findings payload
+    let payload = FindingsPayload {
+        event_type: "findings",
+        selected_folder: folder_path.to_string(),
+        scanned_at,
+        total_folders,
+        findings,
+        errors,
+    };
+    emit_json(&payload);
+
+    // The findings list is consumed by emit_json (via serialize). We need a
+    // fresh reference for execute_plan. Re-generate from the serialized form
+    // to avoid complexity — or just keep them. Let's restructure slightly.
+    // Actually emit_json borrows &payload, so payload.findings is still accessible.
+    // Read execution plan from stdin.
+    let stdin = io::stdin();
+    let mut line = String::new();
+    match stdin.lock().read_line(&mut line) {
+        Ok(0) => return, // EOF — no execution plan sent (scan-only mode)
+        Ok(_) => {}
+        Err(_) => return,
+    }
+
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+
+    let plan: ExecutionPlan = match serde_json::from_str(line) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to parse execution plan: {}", e);
+            return;
+        }
+    };
+
+    // R8 + R9 + R10 — execute and emit result
+    let result = execute_plan(&plan, &payload.findings);
+    emit_json(&result);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn make_dir(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn make_file(parent: &Path, name: &str, content: &[u8]) {
+        let path = parent.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(content).unwrap();
+    }
+
+    // ── civil_from_days ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_epoch_is_1970_01_01() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn test_known_date() {
+        // 2026-03-28 = 20540 days since epoch
+        // Verified: 56 years (1970-2025) = 20454 days; + 31 (Jan) + 28 (Feb) + 27 (Mar 1-27) = 86
+        let (y, m, d) = civil_from_days(20540);
+        assert_eq!((y, m, d), (2026, 3, 28));
+    }
+
+    // ── scan_directory ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_empty_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        assert_eq!(folders.len(), 1); // root itself
+        assert!(errors.is_empty());
+        assert_eq!(folders[0].real_file_count, 0);
+        assert_eq!(folders[0].child_folder_count, 0);
+    }
+
+    #[test]
+    fn test_scan_counts_real_files_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_file(root, "photo.jpg", b"data");
+        make_file(root, ".DS_Store", b"meta");
+        make_file(root, "Thumbs.db", b"meta");
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        assert_eq!(folders[0].real_file_count, 1); // only photo.jpg
+    }
+
+    #[test]
+    fn test_scan_depth_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let a = make_dir(root, "Alpha");
+        make_dir(&a, "Beta");
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let depths: std::collections::HashMap<&str, usize> = folders
+            .iter()
+            .map(|f| (f.name.as_str(), f.depth))
+            .collect();
+        assert_eq!(depths[root.file_name().unwrap().to_str().unwrap()], 0);
+        assert_eq!(depths["Alpha"], 1);
+        assert_eq!(depths["Beta"], 2);
+    }
+
+    // ── generate_findings — empty_folder ─────────────────────────────────
+
+    #[test]
+    fn test_empty_folder_finding() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_dir(root, "Empty");
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let empty: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "empty_folder")
+            .collect();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].display_name, "Empty");
+        assert_eq!(empty[0].action, "remove");
+    }
+
+    #[test]
+    fn test_nonempty_folder_not_flagged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let sub = make_dir(root, "Photos");
+        make_file(&sub, "photo.jpg", b"data");
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let empty: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "empty_folder")
+            .collect();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_root_never_flagged_as_empty() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Root has no files and no subfolders
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let empty: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "empty_folder")
+            .collect();
+        assert!(empty.is_empty());
+    }
+
+    // ── generate_findings — excessive_nesting ─────────────────────────────
+
+    #[test]
+    fn test_excessive_nesting_flagged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Create a 6-level deep path
+        let mut current = root.to_path_buf();
+        for name in &["L1", "L2", "L3", "L4", "L5", "L6"] {
+            current = make_dir(&current, name);
+        }
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let nested: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "excessive_nesting")
+            .collect();
+        assert!(!nested.is_empty());
+        assert_eq!(nested[0].display_name, "L6");
+    }
+
+    #[test]
+    fn test_threshold_depth_not_flagged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut current = root.to_path_buf();
+        // Exactly threshold (5 levels deep)
+        for name in &["L1", "L2", "L3", "L4", "L5"] {
+            current = make_dir(&current, name);
+        }
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let nested: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "excessive_nesting")
+            .collect();
+        assert!(nested.is_empty());
+    }
+
+    // ── generate_findings — naming_inconsistency ──────────────────────────
+
+    #[test]
+    fn test_naming_inconsistency_detected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // 9 Title Case siblings + 1 snake_case outlier = 90% Title Case, meets threshold
+        for name in &[
+            "Alpha Photos", "Beta Videos", "Gamma Music", "Delta Docs",
+            "Epsilon Notes", "Zeta Work", "Eta Finance", "Theta Archive", "Iota Books",
+        ] {
+            let d = make_dir(root, name);
+            make_file(&d, "file.txt", b"x");
+        }
+        let outlier = make_dir(root, "kappa_misc");
+        make_file(&outlier, "file.txt", b"x");
+
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let naming: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "naming_inconsistency")
+            .collect();
+        assert_eq!(naming.len(), 1);
+        assert_eq!(naming[0].display_name, "kappa_misc");
+    }
+
+    #[test]
+    fn test_no_naming_finding_below_threshold() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Only 2 siblings — below min_samples of 3, so no dominant convention
+        for name in &["Alpha Photos", "beta_videos"] {
+            let d = make_dir(root, name);
+            make_file(&d, "file.txt", b"x");
+        }
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let naming: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "naming_inconsistency")
+            .collect();
+        assert!(naming.is_empty());
+    }
+
+    // ── cascade (R5) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cascade_parent_surfaced() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let parent = make_dir(root, "Old Projects");
+        make_dir(&parent, "Archive"); // empty child — will be flagged
+
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let empty: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "empty_folder")
+            .collect();
+
+        // Both Archive (direct) and Old Projects (cascade) should be findings
+        let names: Vec<&str> = empty.iter().map(|f| f.display_name.as_str()).collect();
+        assert!(names.contains(&"Archive"), "Archive not found in: {:?}", names);
+        assert!(
+            names.contains(&"Old Projects"),
+            "Old Projects not found in: {:?}",
+            names
+        );
+
+        // Old Projects should have triggered_by set
+        let cascade = empty
+            .iter()
+            .find(|f| f.display_name == "Old Projects")
+            .unwrap();
+        assert!(cascade.triggered_by.is_some());
+    }
+
+    #[test]
+    fn test_cascade_parent_not_surfaced_when_has_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let parent = make_dir(root, "Projects");
+        make_dir(&parent, "Archive"); // empty child
+        make_file(&parent, "notes.txt", b"data"); // parent has a real file
+
+        let mut folders = Vec::new();
+        let mut errors = Vec::new();
+        scan_directory(root, root, 0, &mut folders, &mut errors);
+        let findings = generate_findings(root, &folders);
+        let empty: Vec<_> = findings
+            .iter()
+            .filter(|f| f.finding_type == "empty_folder")
+            .collect();
+
+        // Only Archive flagged; Projects has a real file so it won't become empty
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].display_name, "Archive");
+    }
+
+    // ── execute_remove ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_execute_remove_moves_to_quarantine() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let quarantine = TempDir::new().unwrap();
+
+        let folder = make_dir(root, "OldStuff");
+        let (outcome, error, dest_str) =
+            execute_remove(&folder, root, quarantine.path());
+
+        assert_eq!(outcome, "succeeded");
+        assert!(error.is_none());
+        assert!(!folder.exists());
+        let dest = PathBuf::from(&dest_str);
+        assert!(dest.exists());
+    }
+
+    #[test]
+    fn test_execute_remove_missing_source_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let quarantine = TempDir::new().unwrap();
+        let ghost = root.join("DoesNotExist");
+        let (outcome, error, _) = execute_remove(&ghost, root, quarantine.path());
+        assert_eq!(outcome, "skipped");
+        assert!(error.is_some());
+    }
+
+    // ── execute_move ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_execute_move_renames_folder() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let src = make_dir(root, "old_name");
+        let dest = root.join("New Name");
+        let (outcome, error, _) = execute_move(&src, &dest);
+        assert_eq!(outcome, "succeeded");
+        assert!(error.is_none());
+        assert!(!src.exists());
+        assert!(dest.exists());
+    }
+
+    #[test]
+    fn test_execute_move_conflict_fails() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let src = make_dir(root, "source");
+        let dest = make_dir(root, "dest"); // already exists
+        let (outcome, error, _) = execute_move(&src, &dest);
+        assert_eq!(outcome, "failed");
+        assert!(error.is_some());
+        assert!(src.exists()); // untouched
+    }
+}

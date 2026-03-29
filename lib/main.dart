@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'manifest_models.dart';
 import 'manifest_service.dart';
+import 'rationalize_screen.dart';
 import 'scan_events.dart';
 
 void main() {
@@ -689,6 +690,22 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton.icon(
+              onPressed: _isScanning
+                  ? null
+                  : () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const RationalizeScreen(),
+                        ),
+                      ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0E70C0),
+                foregroundColor: Colors.white,
+              ),
+              icon: const Icon(Icons.auto_fix_high),
+              label: const Text('Rationalize Folder…'),
             ),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
