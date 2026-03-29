@@ -21,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ---------------------------------------------------------------------------
 
 /// Files treated as system metadata — excluded from real file counts.
-const METADATA_FILES: &[&str] = &[".DS_Store", ".localized", "Thumbs.db"];
+/// `.gitkeep` is a git convention for tracking otherwise-empty directories.
+const METADATA_FILES: &[&str] = &[".DS_Store", ".localized", "Thumbs.db", ".gitkeep"];
 
 /// Folder depth threshold. Folders deeper than this are flagged.
 const NESTING_DEPTH_THRESHOLD: usize = 5;
