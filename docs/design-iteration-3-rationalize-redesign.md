@@ -1,7 +1,7 @@
 # FileSteward: Iteration 3 Rationalize Screen — Redesign
 
 ## Status
-Approved. Ready for implementation.
+Approved. Ready for implementation — supersedes all prior versions of this doc.
 
 **Supersedes:** [`design-iteration-3.md`](design-iteration-3.md) (UI design section only — engine, execution, and log design remain valid)
 
@@ -36,20 +36,28 @@ The Rationalize screen becomes two side-by-side directory tree panels showing th
   - **Orange** — proposed rename
   - **Blue** — proposed move
 - Clean/unflagged folders shown without colour
-- All files visible alongside folders
 
-### Right panel — Target state
-- Computed representation of the directory after all currently-approved actions are applied
+### Right panel — Target state (Panel B)
+- Computed representation of the directory after **all engine-proposed actions are applied by default**
+- The user reviews the target state and **rejects** what they don't want — rejection is the exception, not the rule
 - Folders proposed for removal are **absent** (not greyed out, not struck through — simply not there)
 - Renamed folders shown in the new name, **green italic**
 - Moved folders appear at their destination
-- Files visible alongside folders, same as left
+- Rejected findings cause the affected folder to reappear in the right panel
+
+### Why Panel B (all-changes-applied by default) rather than Panel A (accept-only)?
+
+Panel A (right panel only reflects explicitly accepted changes) was the first implementation. Real-data testing showed that at 181 findings the right panel looked nearly identical to the left because nothing had been accepted yet — defeating the purpose of the two-panel layout.
+
+The right panel's value is showing the destination. Panel B delivers that immediately. The user's primary task becomes scanning the right panel and asking "is this what I want?" — not working through a list of 181 individual accept clicks.
+
+Panel B does not violate the "system never assumes consent" principle. The user is explicitly clicking "Accept All" or "Apply" — they are consenting to the result they see in the right panel. Quarantine provides the safety net: nothing is permanently deleted.
 
 ### Synchronized scrolling
-Removed. Each panel scrolls independently. See design decisions below.
+Removed. Each panel scrolls independently.
 
 ### Detail drawer
-- **Trigger:** single click on any row in either panel
+- **Trigger:** single click on any flagged row in either panel
 - **Fields:**
   - Finding type and severity
   - Folder's current name and full path
@@ -57,10 +65,9 @@ Removed. Each panel scrolls independently. See design decisions below.
   - Inference basis — one plain-English sentence (e.g. *"90% of sibling folders use Title Case"*)
   - For renames: editable field pre-populated with the suggested name
 - **Actions:** Accept / Reject — equal weight, no default
-  - **Accept** — stages the action for execution
-  - **Reject** — explicitly dismisses the finding for this session
-  - Closing the drawer without choosing leaves the finding unresolved — treated as Reject at execution time
-- At execution time (Apply), any finding without an explicit Accept is left alone. The system never assumes consent.
+  - **Accept** — confirms the engine's proposal for this finding
+  - **Reject** — removes the finding's effect from the right panel; folder reappears in target state
+  - Closing the drawer without choosing leaves the finding at its default (applied) state
 - Drawer closes after any action. Clicking the same row again reopens it showing the current decision with option to change it
 - Tree remains visible behind the drawer — no navigation away
 
@@ -70,60 +77,73 @@ Removed. Each panel scrolls independently. See design decisions below.
 
 ### Why two panels instead of a single annotated tree?
 
-A single tree with annotations (badges, strikethroughs, colour highlights) forces the user to mentally simulate the result. Two panels make the simulation explicit. The user can scan the right panel and answer "is this what I want?" without any mental effort.
+A single tree with annotations forces the user to mentally simulate the result. Two panels make the simulation explicit. The user can scan the right panel and answer "is this what I want?" without any mental effort.
 
-**Alternative considered:** Single tree with a toggle between before/after state. Rejected because toggling breaks spatial comparison — you lose the ability to hold both states in view simultaneously.
+**Alternative considered:** Single tree with a toggle between before/after state. Rejected because toggling breaks spatial comparison.
 
 ### Why are removed folders absent in the right panel rather than shown with strikethrough?
 
-Strikethrough draws attention to what's being removed, which inverts the intended reading direction. The right panel is the *answer* — what the directory will look like. Absent folders are simply not part of that answer. The user should be reading the right panel as a destination, not as a diff.
+The right panel is the *answer* — what the directory will look like. Absent folders are simply not part of that answer.
 
-**Alternative considered:** Show removed folders in red strikethrough in the right panel. Rejected because it clutters the target state view and makes it harder to assess whether the result is correct.
+### Why Accept All?
 
-### Why synchronized scrolling rather than independent scrolling?
+At real data scale (181 findings), requiring individual Accept for each finding is a chore that defeats the purpose of the tool. The engine's findings are pattern violations against the folder's own conventions — not ambiguous guesses. The user should be reviewing the *result* (right panel), not ratifying a list of operations.
 
-The value of two panels is spatial comparison — left row N should always be adjacent to right row N. Independent scrolling breaks the alignment and forces the user to manually re-sync, which defeats the purpose.
+Accept All is appropriate here because:
+- Quarantine provides a safety net — nothing is permanently deleted
+- The right panel shows the full result before Apply is pressed
+- Reject is always available for individual exceptions
 
-**Risk acknowledged:** When removed folders create gaps in the right panel, row alignment between panels breaks. This is a known problem. The design accepts the misalignment as the honest representation of what's happening — folders are genuinely absent — rather than inserting placeholder rows to maintain alignment. This is the primary open design question (see below).
+**Decision: "Accept All" button in the bottom bar alongside "Apply". Apply executes whatever is currently reflected in the right panel (all non-rejected findings + user-initiated removals).**
 
-### Why a right-click context menu (Issue #46)?
+### Why a right-click context menu (#46)?
 
-The engine produces findings based on inference. But users may want to mark folders that the engine didn't flag — for example, a folder the user knows is redundant but doesn't match any structural pattern. Right-click gives users the ability to initiate actions on any folder, not just engine-flagged ones.
+Users may want to mark folders the engine didn't flag. Right-click gives users the ability to initiate removals on any folder in the left panel.
 
-This reinforces the design principle: the engine proposes, the user decides. The user is not limited to approving or rejecting engine suggestions — they can originate actions themselves.
+### System folder handling (#57)
 
-### Why build in Flutter rather than validating in a static HTML mockup first?
+Two categories handled differently:
 
-A static mockup would answer visual design questions but not the performance questions at real scale. Flutter's `ListView.builder` virtualizes large lists — the only way to know if 1000+ rows stays performant is to run it natively. Building in Flutter means the work goes directly into the codebase rather than being discarded after validation.
+**GUID-named folders** (e.g. `{4ABEA880-9E0C-11D3-A946-00A0CC51A5BD}`):
+- Pattern: `{8hex-4hex-4hex-4hex-12hex}`
+- Decision: **Option A — skip entirely during scan.** Never appear in tree or findings.
+- Rationale: COM/OLE registration artifacts. Categorically not user data. No individual judgment needed.
+
+**Named Windows/macOS system folders** (e.g. `Application Data`, `Recent`, `NetHood`, `PrintHood`, `Cookies`, `.DS_Store`, `.Spotlight-V100`):
+- Decision: **Option B — surface as a distinct `system_folder` finding type, action: remove, severity: warning.**
+- Shown as a group in the left panel; absent from the right panel by default (Panel B).
+- A single "Remove all system folders" affordance handles the common case.
+- Individual reject still available.
 
 ---
 
-## Design Decisions (resolved in planning)
+## Design Decisions (resolved)
 
 ### 1. Row alignment when right panel has gaps
 **Decision: Drop synchronized scrolling. Right panel is its own clean view.**
 
-When a folder is absent from the right panel, rows shift up and alignment with the left panel breaks. Rather than hiding this with placeholder rows or accepting a broken spatial mirror, the right panel stands on its own terms — a clean representation of the target state, not locked to the left panel's row positions. Synchronized scrolling is removed. Each panel scrolls independently.
-
-Rationale: if alignment breaks at the first removal, synchronized scrolling is already misleading. A clean independent right panel is more honest and less confusing. Complexity can be added in a future iteration if users find the panels hard to cross-reference.
-
 ### 2. Files in both panels
 **Decision: Files collapsed by default. Folders shown first, files visible on demand via expand toggle.**
 
-The Rationalize screen is about folder structure. File-level actions are Iteration 4. Showing thousands of files by default at 200+ folders makes the tree unreadable. Users expand a folder to see its files when they need to.
-
 Files are not colour-coded and not interactive in this iteration.
-
-Also filed: [#51](https://github.com/KarlJBorn/FileSteward/issues/51) — lone file in single-purpose folder as a future finding type.
 
 ### 3. Colour palette
 **Decision: Named constants from day one, tuned after real-data validation.**
 
-The three finding colours (red=remove, orange=rename, blue=move) are defined as named constants rather than inline values, so the entire palette is a one-line change. Legibility will be validated by running against `Born_Family_2000_01_24` (200+ folders, 181 findings) and tuning from there.
+red=remove (`_kRemoveColor`), orange=rename (`_kRenameColor`), blue=move (`_kMoveColor`), green italic=rename target (`_kRenameTargetColor`).
+
+### 4. Right panel default state (Panel B)
+**Decision: Right panel shows all engine-proposed changes applied by default. Reject reverts individual findings.**
+
+### 5. Accept All
+**Decision: "Accept All" button in bottom bar. Apply executes whatever the right panel currently reflects.**
+
+### 6. System folders
+**Decision: GUID folders skipped in scan (Option A). Named system folders flagged as `system_folder` finding type (Option B).**
 
 ---
 
-## Related Issues Filed During Planning
+## Related Issues
 
 | # | Summary |
 |---|---------|
@@ -131,16 +151,20 @@ The three finding colours (red=remove, orange=rename, blue=move) are defined as 
 | [#36](https://github.com/KarlJBorn/FileSteward/issues/36) | Rationalize should inherit already-selected folder |
 | [#37](https://github.com/KarlJBorn/FileSteward/issues/37) | Clarify main screen flow and button sequencing |
 | [#38](https://github.com/KarlJBorn/FileSteward/issues/38) | Folder picker doesn't allow multi-selection |
-| [#40](https://github.com/KarlJBorn/FileSteward/issues/40) | Exclude known system/junk folder patterns from scan |
+| [#40](https://github.com/KarlJBorn/FileSteward/issues/40) | Exclude known system/junk folder patterns from scan (superseded by #57) |
 | [#41](https://github.com/KarlJBorn/FileSteward/issues/41) | Bulk dismiss findings by folder subtree |
 | [#44](https://github.com/KarlJBorn/FileSteward/issues/44) | Redesign: side-by-side before/after directory trees (anchor) |
-| [#45](https://github.com/KarlJBorn/FileSteward/issues/45) | E/D/N/M badges look like buttons but aren't |
 | [#46](https://github.com/KarlJBorn/FileSteward/issues/46) | Right-click context menu for user-initiated folder actions |
 | [#47](https://github.com/KarlJBorn/FileSteward/issues/47) | Path-relationship heuristics and folder cascade logic |
 | [#48](https://github.com/KarlJBorn/FileSteward/issues/48) | Candidate rules catalog for duplicate resolution |
+| [#57](https://github.com/KarlJBorn/FileSteward/issues/57) | System folder detection: GUID folders + named Windows/macOS shell folders |
 
 ---
 
-## What Must Be Resolved Before Implementation Starts
+## What Must Be Resolved Before Next Implementation
 
-All design questions resolved. Ready for implementation.
+All design questions resolved. Next implementation increment:
+1. Panel B (right panel shows all changes by default, reject reverts)
+2. Accept All button
+3. Right-click "Mark for removal" on any left-panel folder (#46)
+4. System folder detection in Rust (#57): GUID skip + `system_folder` finding type
