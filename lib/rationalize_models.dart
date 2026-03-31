@@ -351,3 +351,114 @@ class ExecutionResult {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// BuildCommand (Flutter → Rust, message type: "build")
+// ---------------------------------------------------------------------------
+
+class BuildCommand {
+  final String sourcePath;
+  final String targetPath;
+  final String sessionId;
+  final List<ExecutionActionItem> actions;
+
+  const BuildCommand({
+    required this.sourcePath,
+    required this.targetPath,
+    required this.sessionId,
+    required this.actions,
+  });
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'type': 'build',
+      'source_path': sourcePath,
+      'target_path': targetPath,
+      'session_id': sessionId,
+      'actions': actions.map((a) => a.toJson()).toList(),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BuildResult (Rust → Flutter, message type: "build_complete")
+// ---------------------------------------------------------------------------
+
+class BuildResult {
+  final String sessionId;
+  final String targetPath;
+  final int foldersCopied;
+  final int filesCopied;
+  final int foldersOmitted;
+  final String? error;
+
+  const BuildResult({
+    required this.sessionId,
+    required this.targetPath,
+    required this.foldersCopied,
+    required this.filesCopied,
+    required this.foldersOmitted,
+    this.error,
+  });
+
+  bool get succeeded => error == null;
+
+  factory BuildResult.fromJson(Map<String, dynamic> json) {
+    return BuildResult(
+      sessionId: json['session_id'] as String? ?? '',
+      targetPath: json['target_path'] as String? ?? '',
+      foldersCopied: json['folders_copied'] as int? ?? 0,
+      filesCopied: json['files_copied'] as int? ?? 0,
+      foldersOmitted: json['folders_omitted'] as int? ?? 0,
+      error: json['error'] as String?,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SwapCommand (Flutter → Rust, message type: "swap")
+// ---------------------------------------------------------------------------
+
+class SwapCommand {
+  final String sourcePath;
+  final String targetPath;
+
+  const SwapCommand({
+    required this.sourcePath,
+    required this.targetPath,
+  });
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'type': 'swap',
+      'source_path': sourcePath,
+      'target_path': targetPath,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SwapResult (Rust → Flutter, message type: "swap_complete")
+// ---------------------------------------------------------------------------
+
+class SwapResult {
+  final String oldPath;
+  final String newPath;
+  final String? error;
+
+  const SwapResult({
+    required this.oldPath,
+    required this.newPath,
+    this.error,
+  });
+
+  bool get succeeded => error == null;
+
+  factory SwapResult.fromJson(Map<String, dynamic> json) {
+    return SwapResult(
+      oldPath: json['old_path'] as String? ?? '',
+      newPath: json['new_path'] as String? ?? '',
+      error: json['error'] as String?,
+    );
+  }
+}

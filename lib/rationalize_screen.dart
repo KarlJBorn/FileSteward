@@ -31,7 +31,7 @@ const _kUserRemoveColor = Color(0xFFCD3131); // same red — user-initiated remo
 // Phase enum
 // ---------------------------------------------------------------------------
 
-enum _Phase { folderPicker, scanning, findings, executing, results }
+enum _Phase { folderPicker, scanning, findings, building, swapConfirm, results }
 
 // ---------------------------------------------------------------------------
 // _TreeNode — one row in either panel
@@ -109,7 +109,16 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // Currently open detail drawer finding id.
   String? _drawerFindingId;
 
-  // Execution result
+  // Build phase state
+  BuildResult? _buildResult;
+  int _buildFoldersDone = 0;
+  int _buildFoldersTotal = 0;
+  String _buildCurrentPath = '';
+
+  // Swap phase state
+  SwapResult? _swapResult;
+
+  // Legacy execution result (kept during transition)
   ExecutionResult? _executionResult;
 
   // ---------------------------------------------------------------------------
@@ -297,6 +306,11 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
       _userRemovedPaths.clear();
       _drawerFindingId = null;
       _executionResult = null;
+      _buildResult = null;
+      _swapResult = null;
+      _buildFoldersDone = 0;
+      _buildFoldersTotal = 0;
+      _buildCurrentPath = '';
     });
 
     final session = await _service.startSession(path);
@@ -329,7 +343,7 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Execute
+  // Build
   // ---------------------------------------------------------------------------
 
   Future<void> _applyChanges() async {
@@ -368,17 +382,67 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
       );
     }).toList();
 
-    final plan = ExecutionPlan(
-      selectedFolder: folder,
+    // Target directory: source name + _rationalized, in the same parent.
+    final sourceName = folder.split('/').last;
+    final sourceParent = folder.substring(0, folder.length - sourceName.length)
+        .replaceAll(RegExp(r'/$'), '');
+    final targetPath = '$sourceParent/${sourceName}_rationalized';
+
+    final cmd = BuildCommand(
+      sourcePath: folder,
+      targetPath: targetPath,
       sessionId: sessionId,
       actions: [...engineActions, ...userActions],
     );
 
-    setState(() => _phase = _Phase.executing);
-    final result = await session.execute(plan);
+    setState(() {
+      _phase = _Phase.building;
+      _buildFoldersDone = 0;
+      _buildFoldersTotal = 0;
+      _buildCurrentPath = '';
+      _buildResult = null;
+    });
+
+    final result = await session.build(
+      cmd,
+      onProgress: (done, total, current) {
+        if (!mounted) return;
+        setState(() {
+          _buildFoldersDone = done;
+          _buildFoldersTotal = total;
+          _buildCurrentPath = current;
+        });
+      },
+    );
+
     if (!mounted) return;
     setState(() {
-      _executionResult = result;
+      _buildResult = result;
+      _phase = result?.succeeded == true
+          ? _Phase.swapConfirm
+          : _Phase.results;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Swap
+  // ---------------------------------------------------------------------------
+
+  Future<void> _confirmSwap() async {
+    final session = _session;
+    final buildResult = _buildResult;
+    final folder = _selectedFolder;
+    if (session == null || buildResult == null || folder == null) return;
+
+    final cmd = SwapCommand(
+      sourcePath: folder,
+      targetPath: buildResult.targetPath,
+    );
+
+    final result = await session.swap(cmd);
+    if (!mounted) return;
+    setState(() {
+      _swapResult = result;
       _phase = _Phase.results;
     });
   }
@@ -522,7 +586,8 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         _Phase.folderPicker => _buildFolderPicker(),
         _Phase.scanning => _buildScanning(),
         _Phase.findings => _buildFindingsView(),
-        _Phase.executing => _buildExecuting(),
+        _Phase.building => _buildBuilding(),
+        _Phase.swapConfirm => _buildSwapConfirm(),
         _Phase.results => _buildResults(),
       };
 
@@ -668,19 +733,137 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // Phase: Executing
   // ---------------------------------------------------------------------------
 
-  Widget _buildExecuting() {
-    return const Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CircularProgressIndicator(color: _kBlue),
-          SizedBox(height: 24),
-          Text('Applying changes…',
-              style: TextStyle(color: _kText, fontSize: 14)),
-          SizedBox(height: 8),
-          Text('Moving items to quarantine if needed.',
-              style: TextStyle(color: _kSubtext, fontSize: 12)),
-        ],
+  // ---------------------------------------------------------------------------
+  // Phase: Building
+  // ---------------------------------------------------------------------------
+
+  Widget _buildBuilding() {
+    final total = _buildFoldersTotal;
+    final done = _buildFoldersDone;
+    final progress = total > 0 ? done / total : null;
+    final current = _buildCurrentPath.split('/').last;
+
+    return Center(
+      child: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(
+              value: progress,
+              color: _kBlue,
+            ),
+            const SizedBox(height: 24),
+            const Text('Building rationalized copy…',
+                style: TextStyle(color: _kText, fontSize: 14)),
+            const SizedBox(height: 8),
+            if (total > 0)
+              Text('$done / $total folders',
+                  style: const TextStyle(color: _kSubtext, fontSize: 12)),
+            if (current.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                current,
+                style: const TextStyle(color: _kSubtext, fontSize: 11),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+            const SizedBox(height: 8),
+            const Text(
+              'Your original folder is not being modified.',
+              style: TextStyle(color: _kSubtext, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase: Swap Confirmation
+  // ---------------------------------------------------------------------------
+
+  Widget _buildSwapConfirm() {
+    final buildResult = _buildResult;
+    final folder = _selectedFolder;
+    if (buildResult == null || folder == null) {
+      return const Center(
+          child: Text('No build result.', style: TextStyle(color: _kText)));
+    }
+
+    final sourceName = folder.split('/').last;
+    final oldName = '$sourceName.OLD';
+    final targetName = buildResult.targetPath.split('/').last;
+
+    return Center(
+      child: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Rationalized copy is ready',
+              style: TextStyle(
+                  color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${buildResult.foldersCopied} folders · '
+              '${buildResult.filesCopied} files copied · '
+              '${buildResult.foldersOmitted} folders omitted',
+              style: const TextStyle(color: _kSubtext, fontSize: 13),
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Confirm swap to make it live:',
+              style: TextStyle(color: _kText, fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            _SwapRow(
+              label: 'Original renamed to',
+              value: oldName,
+              color: _kSubtext,
+            ),
+            const SizedBox(height: 6),
+            _SwapRow(
+              label: 'Copy renamed to',
+              value: sourceName,
+              color: _kRenameTargetColor,
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'You can delete $oldName at any time once you\'re satisfied.',
+              style: const TextStyle(color: _kSubtext, fontSize: 12),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _kText,
+                    side: const BorderSide(color: _kDivider),
+                  ),
+                  onPressed: () {
+                    // Cancel — leave the rationalized copy in place; user can
+                    // inspect it before committing.
+                    setState(() => _phase = _Phase.results);
+                  },
+                  child: Text('Not yet — keep $targetName'),
+                ),
+                const SizedBox(width: 12),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _kBlue,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _confirmSwap,
+                  child: const Text('Swap now'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -690,76 +873,161 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildResults() {
-    final result = _executionResult;
-    if (result == null) {
-      return const Center(
-          child: Text('No result.', style: TextStyle(color: _kText)));
-    }
+    // Show swap result if available; fall back to build result.
+    final swapResult = _swapResult;
+    final buildResult = _buildResult;
 
-    final allOk = result.failed == 0;
-    return Center(
-      child: SizedBox(
-        width: 420,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              allOk
-                  ? Icons.check_circle_outline
-                  : Icons.warning_amber_outlined,
-              size: 48,
-              color: allOk ? _kSuccessBadge : _kWarningBadge,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              allOk
-                  ? 'Changes applied successfully'
-                  : '${result.failed} action${result.failed != 1 ? 's' : ''} failed',
-              style: const TextStyle(
-                  color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '${result.succeeded} succeeded · '
-              '${result.skipped} skipped · '
-              '${result.failed} failed',
-              style: const TextStyle(color: _kSubtext, fontSize: 13),
-            ),
-            if (result.succeeded > 0) ...[
-              const SizedBox(height: 8),
-              const Text(
-                'Removed items quarantined at:\n~/.filesteward/quarantine/',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: _kSubtext, fontSize: 12),
+    if (swapResult != null) {
+      // Swap completed (success or failure).
+      final ok = swapResult.succeeded;
+      return Center(
+        child: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                ok ? Icons.check_circle_outline : Icons.warning_amber_outlined,
+                size: 48,
+                color: ok ? _kSuccessBadge : _kWarningBadge,
               ),
-            ],
-            const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: _kText,
-                    side: const BorderSide(color: _kDivider),
-                  ),
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Done'),
+              const SizedBox(height: 16),
+              Text(
+                ok ? 'Swap complete' : 'Swap failed',
+                style: const TextStyle(
+                    color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              if (ok) ...[
+                Text(
+                  'Original backed up at:\n${swapResult.oldPath}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: _kSubtext, fontSize: 12),
                 ),
-                const SizedBox(width: 12),
-                ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _kBlue,
-                    foregroundColor: Colors.white,
-                  ),
-                  icon: const Icon(Icons.refresh, size: 16),
-                  label: const Text('Re-scan'),
-                  onPressed: _rescan,
+              ] else ...[
+                Text(
+                  swapResult.error ?? 'Unknown error.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: _kIssueBadge, fontSize: 12),
                 ),
               ],
-            ),
-          ],
+              const SizedBox(height: 24),
+              _ResultButtons(onDone: () => Navigator.of(context).pop(), onRescan: _rescan),
+            ],
+          ),
         ),
-      ),
+      );
+    }
+
+    if (buildResult != null) {
+      // Build completed but swap was cancelled or failed before running.
+      final ok = buildResult.succeeded;
+      return Center(
+        child: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                ok ? Icons.check_circle_outline : Icons.warning_amber_outlined,
+                size: 48,
+                color: ok ? _kSuccessBadge : _kWarningBadge,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                ok ? 'Build complete — swap not applied' : 'Build failed',
+                style: const TextStyle(
+                    color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              if (ok) ...[
+                Text(
+                  'Rationalized copy is at:\n${buildResult.targetPath}\n\n'
+                  'Your original is untouched.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: _kSubtext, fontSize: 12),
+                ),
+              ] else ...[
+                Text(
+                  buildResult.error ?? 'Unknown error.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: _kIssueBadge, fontSize: 12),
+                ),
+              ],
+              const SizedBox(height: 24),
+              _ResultButtons(onDone: () => Navigator.of(context).pop(), onRescan: _rescan),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return const Center(
+        child: Text('No result.', style: TextStyle(color: _kText)));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _SwapRow — one row in the swap confirmation screen
+// ---------------------------------------------------------------------------
+
+class _SwapRow extends StatelessWidget {
+  const _SwapRow({required this.label, required this.value, required this.color});
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text('$label: ', style: const TextStyle(color: _kSubtext, fontSize: 13)),
+        Expanded(
+          child: Text(
+            value,
+            style: TextStyle(
+                color: color, fontSize: 13, fontWeight: FontWeight.w600),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _ResultButtons — Done + Re-scan row reused in results screens
+// ---------------------------------------------------------------------------
+
+class _ResultButtons extends StatelessWidget {
+  const _ResultButtons({required this.onDone, required this.onRescan});
+  final VoidCallback onDone;
+  final VoidCallback onRescan;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: _kText,
+            side: const BorderSide(color: _kDivider),
+          ),
+          onPressed: onDone,
+          child: const Text('Done'),
+        ),
+        const SizedBox(width: 12),
+        ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _kBlue,
+            foregroundColor: Colors.white,
+          ),
+          icon: const Icon(Icons.refresh, size: 16),
+          label: const Text('Re-scan'),
+          onPressed: onRescan,
+        ),
+      ],
     );
   }
 }

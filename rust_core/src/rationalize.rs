@@ -147,6 +147,14 @@ struct FindingsPayload {
 // JSON input structures (Flutter → Rust)
 // ---------------------------------------------------------------------------
 
+/// Discriminated union for commands sent over stdin. We peek at "type" first.
+#[derive(Deserialize)]
+struct CommandEnvelope {
+    #[serde(rename = "type")]
+    command_type: String,
+}
+
+/// Legacy in-place execution plan (kept for compatibility during transition).
 #[derive(Deserialize)]
 struct ExecutionPlan {
     #[allow(dead_code)]
@@ -163,6 +171,32 @@ struct ExecutionAction {
     action: String,
     absolute_path: String,
     absolute_destination: Option<String>,
+}
+
+/// Copy-then-swap: build phase command.
+#[derive(Deserialize)]
+struct BuildCommand {
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    command_type: String,
+    /// Absolute path of the source directory (never modified).
+    source_path: String,
+    /// Absolute path where the rationalized copy will be created.
+    target_path: String,
+    session_id: String,
+    actions: Vec<ExecutionAction>,
+}
+
+/// Copy-then-swap: swap phase command.
+#[derive(Deserialize)]
+struct SwapCommand {
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    command_type: String,
+    /// The original source directory (will be renamed to source.OLD).
+    source_path: String,
+    /// The rationalized copy (will be renamed to source name).
+    target_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +226,41 @@ struct ExecutionResult {
     log_path: String,
     quarantine_path: String,
     entries: Vec<ExecutionEntry>,
+}
+
+/// Emitted periodically during the build phase.
+#[derive(Serialize)]
+struct BuildProgressEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    folders_done: usize,
+    folders_total: usize,
+    current: String,
+}
+
+/// Emitted when the build phase completes.
+#[derive(Serialize)]
+struct BuildCompleteEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    session_id: String,
+    target_path: String,
+    folders_copied: usize,
+    files_copied: usize,
+    folders_omitted: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Emitted when the swap phase completes.
+#[derive(Serialize)]
+struct SwapCompleteEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    old_path: String,
+    new_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,15 +1157,11 @@ pub fn run(folder_path: &str) {
     };
     emit_json(&payload);
 
-    // The findings list is consumed by emit_json (via serialize). We need a
-    // fresh reference for execute_plan. Re-generate from the serialized form
-    // to avoid complexity — or just keep them. Let's restructure slightly.
-    // Actually emit_json borrows &payload, so payload.findings is still accessible.
-    // Read execution plan from stdin.
+    // Read command from stdin. Dispatch on "type" field.
     let stdin = io::stdin();
     let mut line = String::new();
     match stdin.lock().read_line(&mut line) {
-        Ok(0) => return, // EOF — no execution plan sent (scan-only mode)
+        Ok(0) => return, // EOF — scan-only mode
         Ok(_) => {}
         Err(_) => return,
     }
@@ -1106,17 +1171,282 @@ pub fn run(folder_path: &str) {
         return;
     }
 
-    let plan: ExecutionPlan = match serde_json::from_str(line) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Failed to parse execution plan: {}", e);
-            return;
+    // Peek at the type field to dispatch.
+    let command_type = serde_json::from_str::<CommandEnvelope>(line)
+        .map(|e| e.command_type)
+        .unwrap_or_default();
+
+    match command_type.as_str() {
+        "build" => {
+            let cmd: BuildCommand = match serde_json::from_str(line) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to parse build command: {}", e);
+                    return;
+                }
+            };
+            let build_result = build_target(&cmd);
+            let build_failed = build_result.error.is_some();
+            emit_json(&build_result);
+
+            if build_failed {
+                return;
+            }
+
+            // Wait for the swap command.
+            let mut swap_line = String::new();
+            match io::stdin().lock().read_line(&mut swap_line) {
+                Ok(0) | Err(_) => return, // user cancelled swap
+                Ok(_) => {}
+            }
+            let swap_line = swap_line.trim();
+            if swap_line.is_empty() {
+                return;
+            }
+            let swap_cmd: SwapCommand = match serde_json::from_str(swap_line) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to parse swap command: {}", e);
+                    return;
+                }
+            };
+            let swap_result = execute_swap(&swap_cmd);
+            emit_json(&swap_result);
         }
+        _ => {
+            // Legacy "execute" path — kept for compatibility during transition.
+            let plan: ExecutionPlan = match serde_json::from_str(line) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to parse execution plan: {}", e);
+                    return;
+                }
+            };
+            let result = execute_plan(&plan, &payload.findings);
+            emit_json(&result);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build phase — copy-then-swap engine
+// ---------------------------------------------------------------------------
+
+/// Mutable state threaded through the recursive build walk.
+struct BuildState {
+    folders_done: usize,
+    folders_total: usize,
+    files_copied: usize,
+    folders_omitted: usize,
+}
+
+/// Recursively copy `src_dir` into `tgt_dir`, applying remap and skip tables.
+///
+/// `remap`: source absolute path → target absolute path (renamed/moved entries).
+/// `skip`:  source absolute paths to omit entirely (removed entries).
+///
+/// Children of a remapped directory automatically land under the new target
+/// location because `tgt_dir` is passed down — no global path translation needed.
+fn build_dir(
+    src_dir: &Path,
+    tgt_dir: &Path,
+    remap: &HashMap<PathBuf, PathBuf>,
+    skip: &std::collections::HashSet<PathBuf>,
+    state: &mut BuildState,
+) -> io::Result<()> {
+    fs::create_dir_all(tgt_dir)?;
+    state.folders_done += 1;
+
+    // Emit progress every 10 folders to avoid flooding stdout.
+    if state.folders_done % 10 == 0 || state.folders_done == 1 {
+        emit_json(&BuildProgressEvent {
+            event_type: "build_progress",
+            folders_done: state.folders_done,
+            folders_total: state.folders_total,
+            current: tgt_dir.to_string_lossy().into_owned(),
+        });
+    }
+
+    for entry in fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let src_path = entry.path();
+
+        // Skip entries explicitly marked for removal.
+        if skip.contains(&src_path) {
+            state.folders_omitted += 1;
+            continue;
+        }
+
+        // Compute target path: use remap if present, otherwise mirror under tgt_dir.
+        let tgt_path = remap
+            .get(&src_path)
+            .cloned()
+            .unwrap_or_else(|| tgt_dir.join(entry.file_name()));
+
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            build_dir(&src_path, &tgt_path, remap, skip, state)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = tgt_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src_path, &tgt_path)?;
+            state.files_copied += 1;
+        }
+        // Symlinks are intentionally skipped — they may point outside the tree.
+    }
+
+    Ok(())
+}
+
+/// Execute the build phase: copy source to target applying the approved plan.
+///
+/// Renames and moves are resolved as path remaps in the target tree.
+/// Removes are omitted from the copy entirely.
+/// Source directory is never touched.
+fn build_target(cmd: &BuildCommand) -> BuildCompleteEvent {
+    let source = Path::new(&cmd.source_path);
+    let target = Path::new(&cmd.target_path);
+
+    // Refuse to overwrite an existing target.
+    if target.exists() {
+        return BuildCompleteEvent {
+            event_type: "build_complete",
+            session_id: cmd.session_id.clone(),
+            target_path: cmd.target_path.clone(),
+            folders_copied: 0,
+            files_copied: 0,
+            folders_omitted: 0,
+            error: Some(format!(
+                "Target already exists: {}. Delete it or choose a different location.",
+                cmd.target_path
+            )),
+        };
+    }
+
+    // Build remap and skip tables from the approved action list.
+    let mut remap: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut skip: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    for action in &cmd.actions {
+        let src = PathBuf::from(&action.absolute_path);
+        match action.action.as_str() {
+            "remove" => {
+                skip.insert(src);
+            }
+            "rename" | "move" => {
+                if let Some(dest_src_abs) = &action.absolute_destination {
+                    // dest_src_abs is the destination expressed as an absolute path
+                    // within the source tree (e.g. /source/photos/New Name).
+                    // Translate to target tree by stripping the source prefix and
+                    // prepending the target root.
+                    let dest_src = Path::new(dest_src_abs);
+                    let dest_rel = dest_src
+                        .strip_prefix(source)
+                        .unwrap_or(dest_src);
+                    let dest_tgt = target.join(dest_rel);
+                    remap.insert(src, dest_tgt);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Count total source folders for progress reporting (best-effort).
+    let folders_total = count_dirs(source);
+
+    let mut state = BuildState {
+        folders_done: 0,
+        folders_total,
+        files_copied: 0,
+        folders_omitted: 0,
     };
 
-    // R8 + R9 + R10 — execute and emit result
-    let result = execute_plan(&plan, &payload.findings);
-    emit_json(&result);
+    match build_dir(source, target, &remap, &skip, &mut state) {
+        Ok(()) => BuildCompleteEvent {
+            event_type: "build_complete",
+            session_id: cmd.session_id.clone(),
+            target_path: cmd.target_path.clone(),
+            folders_copied: state.folders_done,
+            files_copied: state.files_copied,
+            folders_omitted: state.folders_omitted,
+            error: None,
+        },
+        Err(e) => BuildCompleteEvent {
+            event_type: "build_complete",
+            session_id: cmd.session_id.clone(),
+            target_path: cmd.target_path.clone(),
+            folders_copied: state.folders_done,
+            files_copied: state.files_copied,
+            folders_omitted: state.folders_omitted,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// Count directories under `path` (non-recursive count is good enough for progress).
+fn count_dirs(path: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(path) else { return 1 };
+    let mut count = 1usize;
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            count += count_dirs(&entry.path());
+        }
+    }
+    count
+}
+
+/// Execute the swap phase:
+/// 1. Rename source → source.OLD
+/// 2. Rename target → source (original name)
+fn execute_swap(cmd: &SwapCommand) -> SwapCompleteEvent {
+    let source = Path::new(&cmd.source_path);
+    let target = Path::new(&cmd.target_path);
+
+    // Derive the .OLD path: same parent, same name with .OLD suffix.
+    let old_path = {
+        let name = source
+            .file_name()
+            .map(|n| format!("{}.OLD", n.to_string_lossy()))
+            .unwrap_or_else(|| "backup.OLD".to_string());
+        source
+            .parent()
+            .map(|p| p.join(&name))
+            .unwrap_or_else(|| PathBuf::from(&name))
+    };
+
+    // Step 1: rename source → .OLD
+    if let Err(e) = fs::rename(source, &old_path) {
+        return SwapCompleteEvent {
+            event_type: "swap_complete",
+            old_path: old_path.to_string_lossy().into_owned(),
+            new_path: cmd.source_path.clone(),
+            error: Some(format!("Could not rename source to .OLD: {}", e)),
+        };
+    }
+
+    // Step 2: rename target → source name
+    if let Err(e) = fs::rename(target, source) {
+        // Best-effort: try to undo step 1 so the user isn't left without their source.
+        let _ = fs::rename(&old_path, source);
+        return SwapCompleteEvent {
+            event_type: "swap_complete",
+            old_path: old_path.to_string_lossy().into_owned(),
+            new_path: cmd.source_path.clone(),
+            error: Some(format!(
+                "Could not rename rationalized copy to source name: {}. \
+                 The original has been restored.",
+                e
+            )),
+        };
+    }
+
+    SwapCompleteEvent {
+        event_type: "swap_complete",
+        old_path: old_path.to_string_lossy().into_owned(),
+        new_path: cmd.source_path.clone(),
+        error: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,5 +1794,153 @@ mod tests {
         assert_eq!(outcome, "failed");
         assert!(error.is_some());
         assert!(src.exists()); // untouched
+    }
+
+    // ── build_target ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_target_mirrors_clean_tree() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "source");
+        let target = root.join("target");
+        make_dir(&source, "photos");
+        make_dir(&source, "docs");
+
+        let cmd = BuildCommand {
+            command_type: "build".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            session_id: "test".to_string(),
+            actions: vec![],
+        };
+        let result = build_target(&cmd);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(target.join("photos").exists());
+        assert!(target.join("docs").exists());
+        assert!(source.exists()); // source untouched
+    }
+
+    #[test]
+    fn test_build_target_applies_rename() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "source");
+        let target = root.join("target");
+        // Use names that differ by more than case so macOS case-insensitive
+        // filesystem doesn't conflate them.
+        let old_dir = make_dir(&source, "photos-raw");
+
+        let cmd = BuildCommand {
+            command_type: "build".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            session_id: "test".to_string(),
+            actions: vec![ExecutionAction {
+                finding_id: "f1".to_string(),
+                action: "rename".to_string(),
+                absolute_path: old_dir.to_string_lossy().into_owned(),
+                absolute_destination: Some(
+                    source.join("Photos").to_string_lossy().into_owned(),
+                ),
+            }],
+        };
+        let result = build_target(&cmd);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(!target.join("photos-raw").exists()); // old name absent
+        assert!(target.join("Photos").exists()); // new name present
+        assert!(source.join("photos-raw").exists()); // source untouched
+    }
+
+    #[test]
+    fn test_build_target_omits_removed_folder() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "source");
+        let target = root.join("target");
+        let keep = make_dir(&source, "keep");
+        let remove = make_dir(&source, "remove_me");
+
+        let cmd = BuildCommand {
+            command_type: "build".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            session_id: "test".to_string(),
+            actions: vec![ExecutionAction {
+                finding_id: "f1".to_string(),
+                action: "remove".to_string(),
+                absolute_path: remove.to_string_lossy().into_owned(),
+                absolute_destination: None,
+            }],
+        };
+        let result = build_target(&cmd);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(target.join("keep").exists());
+        assert!(!target.join("remove_me").exists()); // omitted
+        assert_eq!(result.folders_omitted, 1);
+        assert!(source.join("remove_me").exists()); // source untouched
+        let _ = keep;
+    }
+
+    #[test]
+    fn test_build_target_copies_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "source");
+        let target = root.join("target");
+        let subdir = make_dir(&source, "photos");
+        fs::write(subdir.join("img.jpg"), b"fake jpeg").unwrap();
+
+        let cmd = BuildCommand {
+            command_type: "build".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            session_id: "test".to_string(),
+            actions: vec![],
+        };
+        let result = build_target(&cmd);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.files_copied, 1);
+        assert!(target.join("photos").join("img.jpg").exists());
+    }
+
+    #[test]
+    fn test_build_target_refuses_existing_target() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "source");
+        let target = make_dir(root, "target"); // already exists
+
+        let cmd = BuildCommand {
+            command_type: "build".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            session_id: "test".to_string(),
+            actions: vec![],
+        };
+        let result = build_target(&cmd);
+        assert!(result.error.is_some());
+    }
+
+    // ── execute_swap ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_execute_swap_renames_both_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "MyFolder");
+        let target = make_dir(root, "MyFolder_rationalized");
+        let old_path = root.join("MyFolder.OLD");
+
+        let cmd = SwapCommand {
+            command_type: "swap".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+        };
+        let result = execute_swap(&cmd);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(old_path.exists()); // source renamed to .OLD
+        assert!(source.exists()); // target now at original source path
+        assert!(!target.exists()); // rationalized copy renamed away
     }
 }
