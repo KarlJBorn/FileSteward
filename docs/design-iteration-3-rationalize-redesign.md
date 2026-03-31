@@ -46,15 +46,23 @@ The Rationalize screen becomes two side-by-side directory tree panels showing th
 - Files visible alongside folders, same as left
 
 ### Synchronized scrolling
-- Scrolling either panel scrolls both simultaneously, keeping rows aligned
-- Allows direct visual comparison of any part of the tree
+Removed. Each panel scrolls independently. See design decisions below.
 
 ### Detail drawer
-- Clicking any row (in either panel) slides up a drawer showing:
-  - The finding type and inference basis ("why is this flagged?")
-  - Proposed action and editable proposed name (for renames)
-  - Accept / Reject / Skip actions
-- Drawer does not navigate away from the tree — tree stays visible behind it
+- **Trigger:** single click on any row in either panel
+- **Fields:**
+  - Finding type and severity
+  - Folder's current name and full path
+  - Proposed action (rename to X / move to Y / remove)
+  - Inference basis — one plain-English sentence (e.g. *"90% of sibling folders use Title Case"*)
+  - For renames: editable field pre-populated with the suggested name
+- **Actions:** Accept / Reject — equal weight, no default
+  - **Accept** — stages the action for execution
+  - **Reject** — explicitly dismisses the finding for this session
+  - Closing the drawer without choosing leaves the finding unresolved — treated as Reject at execution time
+- At execution time (Apply), any finding without an explicit Accept is left alone. The system never assumes consent.
+- Drawer closes after any action. Clicking the same row again reopens it showing the current decision with option to change it
+- Tree remains visible behind the drawer — no navigation away
 
 ---
 
@@ -135,7 +143,4 @@ The three finding colours (red=remove, orange=rename, blue=move) are defined as 
 
 ## What Must Be Resolved Before Implementation Starts
 
-1. **Row alignment decision** (open question #1 above) — prototype the gap behaviour before committing to the layout approach
-2. **File display rules** (open question #2) — agree on whether files are collapsed by default
-3. **Colour palette** — validate legibility against a real scan output at 200+ folders
-4. **Detail drawer design** — the trigger (click vs hover), the fields shown, the Accept/Reject/Skip interaction
+All design questions resolved. Ready for implementation.
