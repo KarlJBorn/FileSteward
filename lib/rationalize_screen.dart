@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
@@ -21,17 +19,51 @@ const _kIssueBadge = Color(0xFFCD3131);
 const _kWarningBadge = Color(0xFFCCA700);
 const _kSuccessBadge = Color(0xFF16825D);
 
+// Finding action colors — named constants so the palette is a one-line change.
+const _kRemoveColor = Color(0xFFCD3131); // red — proposed removal
+const _kRenameColor = Color(0xFFCCA700); // orange — proposed rename
+const _kMoveColor = Color(0xFF4FC1FF); // blue — proposed move
+const _kRenameTargetColor = Color(0xFF89D185); // green italic — target panel
+const _kUserRemoveColor = Color(0xFFCD3131); // same red — user-initiated removal
+
 // ---------------------------------------------------------------------------
 // Phase enum
 // ---------------------------------------------------------------------------
 
-enum _Phase {
-  folderPicker,
-  scanning,
-  findings,
-  previewing,
-  executing,
-  results,
+enum _Phase { folderPicker, scanning, findings, executing, results }
+
+// ---------------------------------------------------------------------------
+// _TreeNode — one row in either panel
+// ---------------------------------------------------------------------------
+
+class _TreeNode {
+  final String relativePath;
+  final String absolutePath;
+  final String name;
+  final int depth;
+
+  /// Engine finding on this exact path, if any.
+  final RationalizeFinding? finding;
+
+  /// In the target panel: this node shows a rename's new name.
+  final bool isRenamedTarget;
+
+  /// In the target panel: this node shows a move destination.
+  final bool isMovedTarget;
+
+  /// User marked this subtree for removal via right-click.
+  final bool isUserRemoval;
+
+  const _TreeNode({
+    required this.relativePath,
+    required this.absolutePath,
+    required this.name,
+    required this.depth,
+    this.finding,
+    this.isRenamedTarget = false,
+    this.isMovedTarget = false,
+    this.isUserRemoval = false,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -56,17 +88,194 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   int _foldersScanned = 0;
   String _currentPath = '';
 
-  // Findings state
+  // Findings payload
   FindingsPayload? _payload;
-  final Set<String> _selectedIds = {};
-  final Set<String> _dismissedIds = {};
-  final Map<String, String> _destinationOverrides = {}; // id → abs path
 
-  // Bidirectional selection
-  String? _focusedFindingId;
+  // Panel B decision model:
+  // All engine findings are applied by default. Explicit reject removes the
+  // effect from the right panel. Explicit accept re-applies after a reject.
+  // Absent key = default (applied).
+  // true = explicitly accepted (re-applied after reject)
+  // false = explicitly rejected (removed from right panel)
+  final Map<String, bool> _decisions = {};
 
-  // Execution
+  // User-overridden destination paths for rename/move: finding id → abs path.
+  final Map<String, String> _destinationOverrides = {};
+
+  // User-initiated subtree removals: relative path → absolute path.
+  final Map<String, String> _userRemovedPaths = {};
+
+  // Currently open detail drawer finding id.
+  String? _drawerFindingId;
+
+  // Execution result
   ExecutionResult? _executionResult;
+
+  // ---------------------------------------------------------------------------
+  // Computed helpers
+  // ---------------------------------------------------------------------------
+
+  Set<String> get _rejectedIds =>
+      _decisions.entries.where((e) => !e.value).map((e) => e.key).toSet();
+
+  /// Count of engine findings that will be applied (not rejected) + user removals.
+  int get _pendingCount {
+    final p = _payload;
+    if (p == null) return _userRemovedPaths.length;
+    final engine = p.findings.where((f) => _decisions[f.id] != false).length;
+    return engine + _userRemovedPaths.length;
+  }
+
+  /// Count of explicitly rejected findings.
+  int get _rejectedCount => _rejectedIds.length;
+
+  String _effectiveDestination(RationalizeFinding f) =>
+      _destinationOverrides[f.id] ?? f.absoluteDestination ?? '';
+
+  // ---------------------------------------------------------------------------
+  // Tree building
+  // ---------------------------------------------------------------------------
+
+  List<_TreeNode> _buildOriginalTree(FindingsPayload payload) {
+    final base = payload.selectedFolder;
+    final pathToFinding = <String, RationalizeFinding>{};
+    for (final f in payload.findings) {
+      pathToFinding[f.path] = f;
+    }
+
+    final allPaths = <String>{};
+    for (final f in payload.findings) {
+      _addAncestors(f.path, allPaths);
+    }
+    for (final rel in _userRemovedPaths.keys) {
+      _addAncestors(rel, allPaths);
+    }
+
+    final sorted = allPaths.toList()..sort();
+    return sorted.map((path) {
+      return _TreeNode(
+        relativePath: path,
+        absolutePath: '$base/$path',
+        name: path.split('/').last,
+        depth: path.split('/').length - 1,
+        finding: pathToFinding[path],
+        isUserRemoval: _userRemovedPaths.containsKey(path),
+      );
+    }).toList();
+  }
+
+  /// Panel B: all engine findings applied by default; rejected findings reverted;
+  /// user-initiated removals applied.
+  List<_TreeNode> _buildTargetTree(FindingsPayload payload) {
+    final base = payload.selectedFolder;
+    final rejected = _rejectedIds;
+    final original = _buildOriginalTree(payload);
+
+    // Collect paths that will be absent from the target.
+    final removedPaths = <String>{};
+    for (final f in payload.findings) {
+      if (f.action == FindingAction.remove && !rejected.contains(f.id)) {
+        removedPaths.add(f.path);
+      }
+    }
+    for (final rel in _userRemovedPaths.keys) {
+      removedPaths.add(rel);
+    }
+
+    final result = <_TreeNode>[];
+
+    for (final node in original) {
+      // Omit nodes that are removed or under a removed subtree.
+      final isRemoved = removedPaths.any((rp) =>
+          node.relativePath == rp || node.relativePath.startsWith('$rp/'));
+      if (isRemoved) continue;
+
+      final f = node.finding;
+      if (f != null && !rejected.contains(f.id)) {
+        if (f.action == FindingAction.rename) {
+          final dest = _effectiveDestination(f);
+          final newName = dest.isNotEmpty ? dest.split('/').last : node.name;
+          result.add(_TreeNode(
+            relativePath: node.relativePath,
+            absolutePath: node.absolutePath,
+            name: newName,
+            depth: node.depth,
+            finding: f,
+            isRenamedTarget: true,
+          ));
+          continue;
+        } else if (f.action == FindingAction.move) {
+          continue; // omit from original location; added at destination below
+        }
+      }
+      result.add(node);
+    }
+
+    // Add move destinations for non-rejected move findings.
+    for (final f in payload.findings) {
+      if (f.action != FindingAction.move || rejected.contains(f.id)) continue;
+      final dest = _effectiveDestination(f);
+      if (dest.isEmpty) continue;
+
+      final rel = dest.startsWith(base)
+          ? dest.substring(base.length).replaceAll(RegExp(r'^/'), '')
+          : dest.split('/').last;
+      if (rel.isEmpty) continue;
+
+      result.add(_TreeNode(
+        relativePath: rel,
+        absolutePath: dest,
+        name: rel.split('/').last,
+        depth: rel.split('/').length - 1,
+        finding: f,
+        isMovedTarget: true,
+      ));
+    }
+
+    result.sort((a, b) => a.relativePath.compareTo(b.relativePath));
+    return result;
+  }
+
+  void _addAncestors(String path, Set<String> out) {
+    var p = path;
+    while (p.isNotEmpty) {
+      out.add(p);
+      final slash = p.lastIndexOf('/');
+      if (slash < 0) break;
+      p = p.substring(0, slash);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Decision actions
+  // ---------------------------------------------------------------------------
+
+  void _reject(String id) => setState(() {
+        _decisions[id] = false;
+        if (_drawerFindingId == id) _drawerFindingId = null;
+      });
+
+  void _accept(String id) => setState(() {
+        _decisions[id] = true;
+        if (_drawerFindingId == id) _drawerFindingId = null;
+      });
+
+  void _acceptAll() => setState(() {
+        final p = _payload;
+        if (p == null) return;
+        for (final f in p.findings) {
+          _decisions[f.id] = true;
+        }
+      });
+
+  void _markForRemoval(String relativePath, String absolutePath) =>
+      setState(() => _userRemovedPaths[relativePath] = absolutePath);
+
+  void _unmarkForRemoval(String relativePath) =>
+      setState(() => _userRemovedPaths.remove(relativePath));
+
+  void _openDrawer(String id) => setState(() => _drawerFindingId = id);
+  void _closeDrawer() => setState(() => _drawerFindingId = null);
 
   // ---------------------------------------------------------------------------
   // Scan
@@ -82,10 +291,10 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
       _foldersScanned = 0;
       _currentPath = '';
       _payload = null;
-      _selectedIds.clear();
-      _dismissedIds.clear();
+      _decisions.clear();
       _destinationOverrides.clear();
-      _focusedFindingId = null;
+      _userRemovedPaths.clear();
+      _drawerFindingId = null;
       _executionResult = null;
     });
 
@@ -119,108 +328,26 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Selection helpers
+  // Execute
   // ---------------------------------------------------------------------------
 
-  List<RationalizeFinding> get _visibleFindings {
-    final p = _payload;
-    if (p == null) return [];
-    return p.findings.where((f) => !_dismissedIds.contains(f.id)).toList();
-  }
-
-  List<RationalizeFinding> _visibleFindingsOfType(FindingType type) =>
-      _visibleFindings.where((f) => f.findingType == type).toList();
-
-  bool _allCheckedForType(FindingType type) {
-    final visible = _visibleFindingsOfType(type);
-    if (visible.isEmpty) return false;
-    return visible.every((f) => _selectedIds.contains(f.id));
-  }
-
-  bool _someCheckedForType(FindingType type) {
-    final visible = _visibleFindingsOfType(type);
-    return visible.any((f) => _selectedIds.contains(f.id)) &&
-        !_allCheckedForType(type);
-  }
-
-  void _toggleGroupAll(FindingType type) {
-    final visible = _visibleFindingsOfType(type);
-    setState(() {
-      if (_allCheckedForType(type)) {
-        for (final f in visible) {
-          _selectedIds.remove(f.id);
-        }
-      } else {
-        for (final f in visible) {
-          _selectedIds.add(f.id);
-        }
-      }
-    });
-  }
-
-  void _toggleFinding(String id) {
-    setState(() {
-      if (_selectedIds.contains(id)) {
-        _selectedIds.remove(id);
-      } else {
-        _selectedIds.add(id);
-      }
-    });
-  }
-
-  void _dismissFinding(String id) {
-    setState(() {
-      _dismissedIds.add(id);
-      _selectedIds.remove(id);
-      if (_focusedFindingId == id) _focusedFindingId = null;
-    });
-  }
-
-  void _focusFinding(String id) {
-    setState(() => _focusedFindingId = id);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Destination override
-  // ---------------------------------------------------------------------------
-
-  String _effectiveDestination(RationalizeFinding finding) {
-    return _destinationOverrides[finding.id] ??
-        finding.absoluteDestination ??
-        '';
-  }
-
-  // ---------------------------------------------------------------------------
-  // Preview & Execute
-  // ---------------------------------------------------------------------------
-
-  void _openPreview() {
-    setState(() => _phase = _Phase.previewing);
-  }
-
-  void _closePreview() {
-    setState(() => _phase = _Phase.findings);
-  }
-
-  Future<void> _applySelected() async {
+  Future<void> _applyChanges() async {
     final session = _session;
     final payload = _payload;
     final folder = _selectedFolder;
     if (session == null || payload == null || folder == null) return;
 
-    // Build session ID from current time (matches Rust format YYYY-MM-DDTHH-MM-SS)
     final now = DateTime.now().toUtc();
-    final sessionId =
-        '${now.year.toString().padLeft(4, '0')}-'
+    final sessionId = '${now.year.toString().padLeft(4, '0')}-'
         '${now.month.toString().padLeft(2, '0')}-'
         '${now.day.toString().padLeft(2, '0')}T'
         '${now.hour.toString().padLeft(2, '0')}-'
         '${now.minute.toString().padLeft(2, '0')}-'
         '${now.second.toString().padLeft(2, '0')}';
 
-    final actions = _selectedIds
-        .map((id) => payload.findById(id))
-        .whereType<RationalizeFinding>()
+    // All engine findings not explicitly rejected.
+    final engineActions = payload.findings
+        .where((f) => _decisions[f.id] != false)
         .map((f) => ExecutionActionItem(
               findingId: f.id,
               action: f.action,
@@ -231,17 +358,24 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
             ))
         .toList();
 
+    // User-initiated removals synthesized as remove actions.
+    final userActions = _userRemovedPaths.entries.map((e) {
+      return ExecutionActionItem(
+        findingId: 'user_${e.key}',
+        action: FindingAction.remove,
+        absolutePath: e.value,
+      );
+    }).toList();
+
     final plan = ExecutionPlan(
       selectedFolder: folder,
       sessionId: sessionId,
-      actions: actions,
+      actions: [...engineActions, ...userActions],
     );
 
     setState(() => _phase = _Phase.executing);
-
     final result = await session.execute(plan);
     if (!mounted) return;
-
     setState(() {
       _executionResult = result;
       _phase = _Phase.results;
@@ -259,29 +393,93 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   }
 
   // ---------------------------------------------------------------------------
+  // Context menu
+  // ---------------------------------------------------------------------------
+
+  void _showContextMenu(BuildContext ctx, Offset pos, _TreeNode node) {
+    final finding = node.finding;
+    final isUserMarked = _userRemovedPaths.containsKey(node.relativePath);
+    final decision = finding != null ? _decisions[finding.id] : null;
+
+    showMenu<String>(
+      context: ctx,
+      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + 1, pos.dy + 1),
+      color: const Color(0xFF2D2D30),
+      items: <PopupMenuEntry<String>>[
+        if (finding != null) ...[
+          PopupMenuItem(
+            value: 'accept',
+            child: Text(
+              decision == true ? 'Accepted ✓' : 'Accept — ${_actionLabel(finding)}',
+              style: TextStyle(
+                fontSize: 13,
+                color: decision == true ? _kSuccessBadge : _kText,
+              ),
+            ),
+          ),
+          PopupMenuItem(
+            value: 'reject',
+            child: Text(
+              decision == false ? 'Rejected ✗' : 'Reject this finding',
+              style: TextStyle(
+                fontSize: 13,
+                color: decision == false ? _kSubtext : _kText,
+              ),
+            ),
+          ),
+          const PopupMenuDivider(),
+        ],
+        PopupMenuItem(
+          value: isUserMarked ? 'unmark' : 'mark_remove',
+          child: Text(
+            isUserMarked ? 'Unmark for removal' : 'Mark subtree for removal',
+            style: const TextStyle(fontSize: 13),
+          ),
+        ),
+      ],
+    ).then((value) {
+      if (value == null) return;
+      if (value == 'accept' && finding != null) _accept(finding.id);
+      if (value == 'reject' && finding != null) _reject(finding.id);
+      if (value == 'mark_remove') {
+        _markForRemoval(node.relativePath, node.absolutePath);
+      }
+      if (value == 'unmark') _unmarkForRemoval(node.relativePath);
+    });
+  }
+
+  String _actionLabel(RationalizeFinding f) => switch (f.action) {
+        FindingAction.remove => 'Remove',
+        FindingAction.rename => () {
+            final dest = _effectiveDestination(f);
+            final name = dest.isNotEmpty ? dest.split('/').last : '…';
+            return 'Rename to "$name"';
+          }(),
+        FindingAction.move => 'Move to ${f.destination ?? '…'}',
+      };
+
+  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
   void _showError(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message, style: const TextStyle(color: Colors.white)),
-        backgroundColor: _kIssueBadge,
-        duration: const Duration(seconds: 6),
-      ),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message, style: const TextStyle(color: Colors.white)),
+      backgroundColor: _kIssueBadge,
+      duration: const Duration(seconds: 6),
+    ));
   }
-
-  // ---------------------------------------------------------------------------
-  // Build
-  // ---------------------------------------------------------------------------
 
   @override
   void dispose() {
     _session?.dispose();
     super.dispose();
   }
+
+  // ---------------------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -319,16 +517,13 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
     );
   }
 
-  Widget _buildBody() {
-    return switch (_phase) {
-      _Phase.folderPicker => _buildFolderPicker(),
-      _Phase.scanning => _buildScanning(),
-      _Phase.findings => _buildFindingsView(),
-      _Phase.previewing => _buildPreviewView(),
-      _Phase.executing => _buildExecuting(),
-      _Phase.results => _buildResults(),
-    };
-  }
+  Widget _buildBody() => switch (_phase) {
+        _Phase.folderPicker => _buildFolderPicker(),
+        _Phase.scanning => _buildScanning(),
+        _Phase.findings => _buildFindingsView(),
+        _Phase.executing => _buildExecuting(),
+        _Phase.results => _buildResults(),
+      };
 
   // ---------------------------------------------------------------------------
   // Phase: Folder picker
@@ -341,10 +536,8 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         children: [
           const Icon(Icons.folder_open, size: 64, color: _kSubtext),
           const SizedBox(height: 16),
-          const Text(
-            'Choose a folder to rationalize',
-            style: TextStyle(color: _kText, fontSize: 16),
-          ),
+          const Text('Choose a folder to rationalize',
+              style: TextStyle(color: _kText, fontSize: 16)),
           const SizedBox(height: 8),
           const Text(
             'FileSteward will analyze the folder structure and\n'
@@ -382,23 +575,16 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
           children: [
             const CircularProgressIndicator(color: _kBlue),
             const SizedBox(height: 24),
-            Text(
-              'Scanning folder structure…',
-              style: const TextStyle(color: _kText, fontSize: 14),
-            ),
+            const Text('Scanning folder structure…',
+                style: TextStyle(color: _kText, fontSize: 14)),
             const SizedBox(height: 8),
-            Text(
-              '$_foldersScanned folders scanned',
-              style: const TextStyle(color: _kSubtext, fontSize: 12),
-            ),
+            Text('$_foldersScanned folders scanned',
+                style: const TextStyle(color: _kSubtext, fontSize: 12)),
             if (_currentPath.isNotEmpty) ...[
               const SizedBox(height: 4),
-              Text(
-                _currentPath,
-                style:
-                    const TextStyle(color: _kSubtext, fontSize: 11),
-                overflow: TextOverflow.ellipsis,
-              ),
+              Text(_currentPath,
+                  style: const TextStyle(color: _kSubtext, fontSize: 11),
+                  overflow: TextOverflow.ellipsis),
             ],
           ],
         ),
@@ -407,152 +593,71 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase: Findings two-panel view
+  // Phase: Findings — before/after tree panels
   // ---------------------------------------------------------------------------
 
   Widget _buildFindingsView() {
     final payload = _payload!;
-    final selectedCount = _selectedIds.length;
+    final originalNodes = _buildOriginalTree(payload);
+    final targetNodes = _buildTargetTree(payload);
+    final drawerFinding =
+        _drawerFindingId != null ? payload.findById(_drawerFindingId!) : null;
 
     return Column(
       children: [
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Stack(
             children: [
-              // Left: findings panel
-              SizedBox(
-                width: 420,
-                child: _FindingsPanel(
-                  payload: payload,
-                  visibleFindings: _visibleFindings,
-                  selectedIds: _selectedIds,
-                  focusedId: _focusedFindingId,
-                  destinationOverrides: _destinationOverrides,
-                  onToggle: _toggleFinding,
-                  onDismiss: _dismissFinding,
-                  onFocus: _focusFinding,
-                  onGroupAllToggle: _toggleGroupAll,
-                  isAllChecked: _allCheckedForType,
-                  isSomeChecked: _someCheckedForType,
-                  onDestinationChanged: (id, path) => setState(
-                    () => _destinationOverrides[id] = path,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Left — original state
+                  Expanded(
+                    child: _OriginalTreePanel(
+                      nodes: originalNodes,
+                      decisions: _decisions,
+                      drawerFindingId: _drawerFindingId,
+                      onNodeTap: (node) {
+                        if (node.finding != null) _openDrawer(node.finding!.id);
+                      },
+                      onNodeRightClick: _showContextMenu,
+                    ),
+                  ),
+                  Container(width: 1, color: _kDivider),
+                  // Right — target state
+                  Expanded(
+                    child: _TargetTreePanel(
+                      nodes: targetNodes,
+                      drawerFindingId: _drawerFindingId,
+                      onNodeTap: (node) {
+                        if (node.finding != null) _openDrawer(node.finding!.id);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              // Detail drawer
+              if (drawerFinding != null)
+                _DetailDrawerOverlay(
+                  finding: drawerFinding,
+                  decision: _decisions[drawerFinding.id],
+                  destinationOverride: _destinationOverrides[drawerFinding.id],
+                  onAccept: () => _accept(drawerFinding.id),
+                  onReject: () => _reject(drawerFinding.id),
+                  onClose: _closeDrawer,
+                  onDestinationChanged: (path) => setState(
+                    () => _destinationOverrides[drawerFinding.id] = path,
                   ),
                 ),
-              ),
-              Container(width: 1, color: _kDivider),
-              // Right: folder tree
-              Expanded(
-                child: _TreePanel(
-                  payload: payload,
-                  selectedIds: _selectedIds,
-                  dismissedIds: _dismissedIds,
-                  focusedId: _focusedFindingId,
-                  onFocus: _focusFinding,
-                ),
-              ),
             ],
           ),
         ),
         Container(height: 1, color: _kDivider),
         _BottomBar(
-          selectedCount: selectedCount,
-          totalVisible: _visibleFindings.length,
-          onPreview: selectedCount > 0 ? _openPreview : null,
-          onApply: selectedCount > 0 ? _applySelected : null,
-        ),
-      ],
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Phase: Preview
-  // ---------------------------------------------------------------------------
-
-  Widget _buildPreviewView() {
-    final payload = _payload!;
-    final selected = _selectedIds
-        .map((id) => payload.findById(id))
-        .whereType<RationalizeFinding>()
-        .toList();
-
-    return Column(
-      children: [
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Preview Changes',
-                  style: TextStyle(
-                      color: _kText,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '${selected.length} action${selected.length != 1 ? 's' : ''} will be applied. '
-                  'Removed items are moved to quarantine — nothing is permanently deleted.',
-                  style:
-                      const TextStyle(color: _kSubtext, fontSize: 13),
-                ),
-                const SizedBox(height: 24),
-                ...selected.map((f) => _PreviewRow(
-                      finding: f,
-                      effectiveDestination: _effectiveDestination(f),
-                    )),
-                const SizedBox(height: 16),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: _kPanelBg,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: _kDivider),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.archive_outlined,
-                          color: _kSubtext, size: 16),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'Quarantine: ~/.filesteward/quarantine/',
-                          style: const TextStyle(
-                              color: _kSubtext, fontSize: 12),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        Container(height: 1, color: _kDivider),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: _closePreview,
-                child: const Text('Cancel',
-                    style: TextStyle(color: _kSubtext)),
-              ),
-              const SizedBox(width: 8),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _kBlue,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: _applySelected,
-                child: Text(
-                    'Apply ${_selectedIds.length} Change${_selectedIds.length != 1 ? 's' : ''}'),
-              ),
-            ],
-          ),
+          pendingCount: _pendingCount,
+          rejectedCount: _rejectedCount,
+          onAcceptAll: _acceptAll,
+          onApply: _pendingCount > 0 ? _applyChanges : null,
         ),
       ],
     );
@@ -569,15 +674,11 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         children: [
           CircularProgressIndicator(color: _kBlue),
           SizedBox(height: 24),
-          Text(
-            'Applying changes…',
-            style: TextStyle(color: _kText, fontSize: 14),
-          ),
+          Text('Applying changes…',
+              style: TextStyle(color: _kText, fontSize: 14)),
           SizedBox(height: 8),
-          Text(
-            'Moving items to quarantine if needed.',
-            style: TextStyle(color: _kSubtext, fontSize: 12),
-          ),
+          Text('Moving items to quarantine if needed.',
+              style: TextStyle(color: _kSubtext, fontSize: 12)),
         ],
       ),
     );
@@ -595,7 +696,6 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
     }
 
     final allOk = result.failed == 0;
-
     return Center(
       child: SizedBox(
         width: 420,
@@ -603,7 +703,9 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              allOk ? Icons.check_circle_outline : Icons.warning_amber_outlined,
+              allOk
+                  ? Icons.check_circle_outline
+                  : Icons.warning_amber_outlined,
               size: 48,
               color: allOk ? _kSuccessBadge : _kWarningBadge,
             ),
@@ -613,9 +715,7 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                   ? 'Changes applied successfully'
                   : '${result.failed} action${result.failed != 1 ? 's' : ''} failed',
               style: const TextStyle(
-                  color: _kText,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600),
+                  color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 8),
             Text(
@@ -626,10 +726,10 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
             ),
             if (result.succeeded > 0) ...[
               const SizedBox(height: 8),
-              Text(
+              const Text(
                 'Removed items quarantined at:\n~/.filesteward/quarantine/',
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: _kSubtext, fontSize: 12),
+                style: TextStyle(color: _kSubtext, fontSize: 12),
               ),
             ],
             const SizedBox(height: 24),
@@ -664,574 +764,60 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// _FindingsPanel — left panel
+// _OriginalTreePanel — left panel, color-coded by action
 // ---------------------------------------------------------------------------
 
-class _FindingsPanel extends StatelessWidget {
-  const _FindingsPanel({
-    required this.payload,
-    required this.visibleFindings,
-    required this.selectedIds,
-    required this.focusedId,
-    required this.destinationOverrides,
-    required this.onToggle,
-    required this.onDismiss,
-    required this.onFocus,
-    required this.onGroupAllToggle,
-    required this.isAllChecked,
-    required this.isSomeChecked,
-    required this.onDestinationChanged,
+class _OriginalTreePanel extends StatelessWidget {
+  const _OriginalTreePanel({
+    required this.nodes,
+    required this.decisions,
+    required this.drawerFindingId,
+    required this.onNodeTap,
+    required this.onNodeRightClick,
   });
 
-  final FindingsPayload payload;
-  final List<RationalizeFinding> visibleFindings;
-  final Set<String> selectedIds;
-  final String? focusedId;
-  final Map<String, String> destinationOverrides;
-  final void Function(String id) onToggle;
-  final void Function(String id) onDismiss;
-  final void Function(String id) onFocus;
-  final void Function(FindingType type) onGroupAllToggle;
-  final bool Function(FindingType type) isAllChecked;
-  final bool Function(FindingType type) isSomeChecked;
-  final void Function(String id, String path) onDestinationChanged;
-
-  static const _groupOrder = [
-    FindingType.emptyFolder,
-    FindingType.namingInconsistency,
-    FindingType.misplacedFile,
-    FindingType.excessiveNesting,
-  ];
+  final List<_TreeNode> nodes;
+  final Map<String, bool> decisions;
+  final String? drawerFindingId;
+  final void Function(_TreeNode) onNodeTap;
+  final void Function(BuildContext, Offset, _TreeNode) onNodeRightClick;
 
   @override
   Widget build(BuildContext context) {
-    if (visibleFindings.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            'No findings. Your folder structure looks good!',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: _kSubtext, fontSize: 13),
-          ),
-        ),
-      );
-    }
-
-    final groups = <FindingType, List<RationalizeFinding>>{};
-    for (final type in _groupOrder) {
-      final items =
-          visibleFindings.where((f) => f.findingType == type).toList();
-      if (items.isNotEmpty) groups[type] = items;
-    }
-
     return Column(
       children: [
-        // Header
-        Container(
-          height: 32,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          color: _kPanelBg,
-          alignment: Alignment.centerLeft,
-          child: Text(
-            '${visibleFindings.length} finding${visibleFindings.length != 1 ? 's' : ''}',
-            style:
-                const TextStyle(color: _kSubtext, fontSize: 11),
-          ),
-        ),
-        Container(height: 1, color: _kDivider),
-        // Groups
-        Expanded(
-          child: ListView(
-            children: [
-              for (final type in _groupOrder)
-                if (groups.containsKey(type)) ...[
-                  _FindingGroupHeader(
-                    type: type,
-                    count: groups[type]!.length,
-                    allChecked: isAllChecked(type),
-                    someChecked: isSomeChecked(type),
-                    onToggleAll: () => onGroupAllToggle(type),
-                  ),
-                  for (final finding in groups[type]!)
-                    _FindingRow(
-                      finding: finding,
-                      isSelected: selectedIds.contains(finding.id),
-                      isFocused: focusedId == finding.id,
-                      overridePath: destinationOverrides[finding.id],
-                      onToggle: () => onToggle(finding.id),
-                      onDismiss: () => onDismiss(finding.id),
-                      onTap: () => onFocus(finding.id),
-                      onDestinationChanged: (path) =>
-                          onDestinationChanged(finding.id, path),
-                    ),
-                ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// _FindingGroupHeader
-// ---------------------------------------------------------------------------
-
-class _FindingGroupHeader extends StatelessWidget {
-  const _FindingGroupHeader({
-    required this.type,
-    required this.count,
-    required this.allChecked,
-    required this.someChecked,
-    required this.onToggleAll,
-  });
-
-  final FindingType type;
-  final int count;
-  final bool allChecked;
-  final bool someChecked;
-  final VoidCallback onToggleAll;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onToggleAll,
-      child: Container(
-        height: 30,
-        color: const Color(0xFF2D2D30),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Row(
-          children: [
-            _TriStateCheckbox(
-              checked: allChecked,
-              indeterminate: someChecked,
-              onTap: onToggleAll,
-            ),
-            const SizedBox(width: 8),
-            _FindingTypeBadge(type: type),
-            const SizedBox(width: 8),
-            Text(
-              type.label,
-              style: const TextStyle(
-                  color: _kText,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600),
-            ),
-            const Spacer(),
-            Text(
-              '$count',
-              style: const TextStyle(color: _kSubtext, fontSize: 11),
-            ),
-            const SizedBox(width: 4),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// _FindingRow
-// ---------------------------------------------------------------------------
-
-class _FindingRow extends StatefulWidget {
-  const _FindingRow({
-    required this.finding,
-    required this.isSelected,
-    required this.isFocused,
-    required this.overridePath,
-    required this.onToggle,
-    required this.onDismiss,
-    required this.onTap,
-    required this.onDestinationChanged,
-  });
-
-  final RationalizeFinding finding;
-  final bool isSelected;
-  final bool isFocused;
-  final String? overridePath;
-  final VoidCallback onToggle;
-  final VoidCallback onDismiss;
-  final VoidCallback onTap;
-  final void Function(String path) onDestinationChanged;
-
-  @override
-  State<_FindingRow> createState() => _FindingRowState();
-}
-
-class _FindingRowState extends State<_FindingRow> {
-  bool _showOverrideInput = false;
-  final _overrideController = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    _overrideController.text =
-        widget.overridePath ?? widget.finding.absoluteDestination ?? '';
-  }
-
-  @override
-  void dispose() {
-    _overrideController.dispose();
-    super.dispose();
-  }
-
-  String get _proposedAction {
-    switch (widget.finding.action) {
-      case FindingAction.remove:
-        return 'Remove → Quarantine';
-      case FindingAction.rename:
-        final dest = widget.overridePath ??
-            widget.finding.destination ??
-            '';
-        final name = dest.split('/').last;
-        return 'Rename to "$name"';
-      case FindingAction.move:
-        final dest = widget.overridePath ??
-            widget.finding.destination ??
-            '';
-        return 'Move to $dest';
-    }
-  }
-
-  bool get _canOverrideDestination =>
-      widget.finding.action != FindingAction.remove;
-
-  @override
-  Widget build(BuildContext context) {
-    final isFocused = widget.isFocused;
-    return GestureDetector(
-      onTap: widget.onTap,
-      child: Container(
-        color: isFocused
-            ? _kBlue.withValues(alpha: 0.15)
-            : Colors.transparent,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _TriStateCheckbox(
-                    checked: widget.isSelected,
-                    indeterminate: false,
-                    onTap: widget.onToggle,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Name + dependency indicator
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                widget.finding.displayName,
-                                style: const TextStyle(
-                                    color: _kText, fontSize: 13),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (widget.finding.isDependent)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.only(left: 4),
-                                child: Text(
-                                  '↳ cascade',
-                                  style: const TextStyle(
-                                      color: _kSubtext, fontSize: 10),
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 2),
-                        // Relative path
-                        Text(
-                          widget.finding.path,
-                          style: const TextStyle(
-                              color: _kSubtext, fontSize: 11),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        // Proposed action
-                        Text(
-                          _proposedAction,
-                          style: const TextStyle(
-                              color: _kSubtext, fontSize: 11),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        // Destination override link
-                        if (_canOverrideDestination) ...[
-                          const SizedBox(height: 4),
-                          GestureDetector(
-                            onTap: () => setState(
-                                () => _showOverrideInput = !_showOverrideInput),
-                            child: Text(
-                              _showOverrideInput
-                                  ? 'Cancel override'
-                                  : 'Choose location…',
-                              style: const TextStyle(
-                                  color: _kBlue,
-                                  fontSize: 11,
-                                  decoration: TextDecoration.underline),
-                            ),
-                          ),
-                        ],
-                        // Inline override input
-                        if (_showOverrideInput)
-                          _DestinationOverrideInput(
-                            controller: _overrideController,
-                            onChanged: widget.onDestinationChanged,
-                          ),
-                      ],
-                    ),
-                  ),
-                  // Dismiss button
-                  GestureDetector(
-                    onTap: widget.onDismiss,
-                    child: const Padding(
-                      padding: EdgeInsets.only(left: 8, top: 2),
-                      child: Icon(Icons.close,
-                          size: 14, color: _kSubtext),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(height: 1, color: _kDivider.withValues(alpha: 0.5)),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// _DestinationOverrideInput
-// ---------------------------------------------------------------------------
-
-class _DestinationOverrideInput extends StatefulWidget {
-  const _DestinationOverrideInput({
-    required this.controller,
-    required this.onChanged,
-  });
-
-  final TextEditingController controller;
-  final void Function(String path) onChanged;
-
-  @override
-  State<_DestinationOverrideInput> createState() =>
-      _DestinationOverrideInputState();
-}
-
-class _DestinationOverrideInputState
-    extends State<_DestinationOverrideInput> {
-  bool? _exists; // null = unchecked, true = exists, false = will be created
-
-  @override
-  void initState() {
-    super.initState();
-    _checkPath(widget.controller.text);
-    widget.controller.addListener(_handleChange);
-  }
-
-  @override
-  void dispose() {
-    widget.controller.removeListener(_handleChange);
-    super.dispose();
-  }
-
-  void _handleChange() {
-    _checkPath(widget.controller.text);
-    widget.onChanged(widget.controller.text.trim());
-  }
-
-  void _checkPath(String path) {
-    final trimmed = path.trim();
-    if (trimmed.isEmpty) {
-      if (mounted) setState(() => _exists = null);
-      return;
-    }
-    final exists = Directory(trimmed).existsSync();
-    if (mounted) setState(() => _exists = exists);
-  }
-
-  Future<void> _browse() async {
-    final path = await getDirectoryPath();
-    if (path != null && path.isNotEmpty) {
-      widget.controller.text = path;
-      widget.onChanged(path);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: widget.controller,
-                  style: const TextStyle(
-                      color: _kText, fontSize: 11),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 6),
-                    filled: true,
-                    fillColor: const Color(0xFF3C3C3C),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(4),
-                      borderSide: const BorderSide(
-                          color: _kDivider),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(4),
-                      borderSide:
-                          const BorderSide(color: _kDivider),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              TextButton(
-                style: TextButton.styleFrom(
-                  foregroundColor: _kText,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 6),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                onPressed: _browse,
-                child: const Text('Browse',
-                    style: TextStyle(fontSize: 11)),
-              ),
-            ],
-          ),
-          if (_exists != null) ...[
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Icon(
-                  Icons.circle,
-                  size: 8,
-                  color: _exists! ? _kSuccessBadge : _kWarningBadge,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  _exists! ? 'Folder exists' : 'Will be created',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: _exists! ? _kSuccessBadge : _kWarningBadge,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// _TreePanel — right panel (Finder-style folder tree)
-// ---------------------------------------------------------------------------
-
-class _TreePanel extends StatelessWidget {
-  const _TreePanel({
-    required this.payload,
-    required this.selectedIds,
-    required this.dismissedIds,
-    required this.focusedId,
-    required this.onFocus,
-  });
-
-  final FindingsPayload payload;
-  final Set<String> selectedIds;
-  final Set<String> dismissedIds;
-  final String? focusedId;
-  final void Function(String id) onFocus;
-
-  @override
-  Widget build(BuildContext context) {
-    // Build a map: relative_path → list of (non-dismissed) finding IDs
-    final pathFindings = <String, List<RationalizeFinding>>{};
-    for (final f in payload.findings) {
-      if (!dismissedIds.contains(f.id)) {
-        pathFindings.putIfAbsent(f.path, () => []).add(f);
-      }
-    }
-
-    // Collect all unique folder paths from findings
-    final allPaths = <String>{};
-    for (final f in payload.findings) {
-      final parts = f.path.split('/');
-      for (int i = 1; i <= parts.length; i++) {
-        allPaths.add(parts.sublist(0, i).join('/'));
-      }
-    }
-    final sortedPaths = allPaths.toList()..sort();
-
-    return Column(
-      children: [
-        // Column headers
-        Container(
-          height: 32,
-          color: _kPanelBg,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: [
-              const Expanded(
-                flex: 5,
-                child: Text('Name',
-                    style:
-                        TextStyle(color: _kSubtext, fontSize: 11)),
-              ),
-              const SizedBox(
-                width: 120,
-                child: Text('Findings',
-                    style: TextStyle(
-                        color: _kSubtext, fontSize: 11)),
-              ),
-            ],
-          ),
-        ),
-        Container(height: 1, color: _kDivider),
-        // Tree rows
+        _PanelHeader(title: 'Original', subtitle: '${nodes.length} folders'),
         Expanded(
           child: ListView.builder(
-            itemCount: sortedPaths.length,
-            itemBuilder: (context, index) {
-              final path = sortedPaths[index];
-              final depth =
-                  path.split('/').length - 1;
-              final name = path.split('/').last;
-              final findings = pathFindings[path] ?? [];
-              final focusedHere = findings.any(
-                  (f) => f.id == focusedId);
+            itemCount: nodes.length,
+            itemBuilder: (ctx, i) {
+              final node = nodes[i];
+              final f = node.finding;
 
-              return _TreeRow(
-                name: name,
-                depth: depth,
-                findings: findings,
-                isFocused: focusedHere,
-                hasDescendantFindings:
-                    pathFindings.keys.any((k) =>
-                        k.startsWith('$path/') &&
-                        pathFindings[k]!.isNotEmpty),
-                onTap: findings.isNotEmpty
-                    ? () => onFocus(findings.first.id)
-                    : null,
+              Color? nameColor;
+              if (node.isUserRemoval) {
+                nameColor = _kUserRemoveColor;
+              } else if (f != null) {
+                nameColor = switch (f.action) {
+                  FindingAction.remove => _kRemoveColor,
+                  FindingAction.rename => _kRenameColor,
+                  FindingAction.move => _kMoveColor,
+                };
+              }
+
+              // Dim color when explicitly rejected.
+              final isRejected = f != null && decisions[f.id] == false;
+
+              return _TreeNodeRow(
+                name: node.name,
+                depth: node.depth,
+                nameColor: isRejected ? _kSubtext : nameColor,
+                isItalic: false,
+                isStrikethrough: isRejected,
+                decision: f != null ? decisions[f.id] : null,
+                isFocused: f != null && f.id == drawerFindingId,
+                onTap: () => onNodeTap(node),
+                onSecondaryTap: (pos) => onNodeRightClick(ctx, pos, node),
               );
             },
           ),
@@ -1242,63 +828,516 @@ class _TreePanel extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// _TreeRow
+// _TargetTreePanel — right panel, clean target state
 // ---------------------------------------------------------------------------
 
-class _TreeRow extends StatelessWidget {
-  const _TreeRow({
+class _TargetTreePanel extends StatelessWidget {
+  const _TargetTreePanel({
+    required this.nodes,
+    required this.drawerFindingId,
+    required this.onNodeTap,
+  });
+
+  final List<_TreeNode> nodes;
+  final String? drawerFindingId;
+  final void Function(_TreeNode) onNodeTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _PanelHeader(title: 'Target', subtitle: '${nodes.length} folders'),
+        Expanded(
+          child: nodes.isEmpty
+              ? const Center(
+                  child: Text(
+                    'Nothing to show — all findings rejected.',
+                    style: TextStyle(color: _kSubtext, fontSize: 13),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: nodes.length,
+                  itemBuilder: (_, i) {
+                    final node = nodes[i];
+                    final f = node.finding;
+
+                    Color? nameColor;
+                    bool isItalic = false;
+                    if (node.isRenamedTarget || node.isMovedTarget) {
+                      nameColor = _kRenameTargetColor;
+                      isItalic = true;
+                    }
+
+                    return _TreeNodeRow(
+                      name: node.name,
+                      depth: node.depth,
+                      nameColor: nameColor,
+                      isItalic: isItalic,
+                      isStrikethrough: false,
+                      decision: null,
+                      isFocused: f != null && f.id == drawerFindingId,
+                      onTap: () => onNodeTap(node),
+                      onSecondaryTap: null,
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _PanelHeader
+// ---------------------------------------------------------------------------
+
+class _PanelHeader extends StatelessWidget {
+  const _PanelHeader({required this.title, required this.subtitle});
+
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          height: 36,
+          color: _kPanelBg,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              Text(title,
+                  style: const TextStyle(
+                      color: _kText,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(width: 8),
+              Text(subtitle,
+                  style: const TextStyle(color: _kSubtext, fontSize: 11)),
+            ],
+          ),
+        ),
+        Container(height: 1, color: _kDivider),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _TreeNodeRow
+// ---------------------------------------------------------------------------
+
+class _TreeNodeRow extends StatelessWidget {
+  const _TreeNodeRow({
     required this.name,
     required this.depth,
-    required this.findings,
+    required this.nameColor,
+    required this.isItalic,
+    required this.isStrikethrough,
+    required this.decision,
     required this.isFocused,
-    required this.hasDescendantFindings,
-    this.onTap,
+    required this.onTap,
+    required this.onSecondaryTap,
   });
 
   final String name;
   final int depth;
-  final List<RationalizeFinding> findings;
+  final Color? nameColor;
+  final bool isItalic;
+  final bool isStrikethrough;
+  final bool? decision; // true=accepted, false=rejected, null=default
   final bool isFocused;
-  final bool hasDescendantFindings;
   final VoidCallback? onTap;
+  final void Function(Offset)? onSecondaryTap;
 
   @override
   Widget build(BuildContext context) {
+    final textColor = nameColor ?? _kText;
+    final folderIconColor = nameColor ?? const Color(0xFF4FC1FF);
+
     return GestureDetector(
       onTap: onTap,
+      onSecondaryTapUp: onSecondaryTap != null
+          ? (d) => onSecondaryTap!(d.globalPosition)
+          : null,
       child: Container(
         height: 26,
-        color: isFocused ? _kBlue.withValues(alpha: 0.15) : Colors.transparent,
-        padding: EdgeInsets.only(left: 12.0 + depth * 16),
+        color: isFocused
+            ? _kBlue.withValues(alpha: 0.2)
+            : Colors.transparent,
+        padding: EdgeInsets.only(left: 12.0 + depth * 16.0, right: 8),
         child: Row(
           children: [
-            const Icon(Icons.folder, size: 14, color: Color(0xFF4FC1FF)),
+            Icon(Icons.folder, size: 14, color: folderIconColor),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
                 name,
-                style:
-                    const TextStyle(color: _kText, fontSize: 12),
+                style: TextStyle(
+                  color: textColor,
+                  fontSize: 12,
+                  fontStyle: isItalic ? FontStyle.italic : FontStyle.normal,
+                  decoration: isStrikethrough
+                      ? TextDecoration.lineThrough
+                      : TextDecoration.none,
+                  decorationColor: _kSubtext,
+                ),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            if (hasDescendantFindings && findings.isEmpty)
+            // Decision indicator
+            if (decision == true)
               const Padding(
-                padding: EdgeInsets.only(right: 4),
-                child: Text('↓',
-                    style: TextStyle(
-                        color: _kSubtext, fontSize: 10)),
+                padding: EdgeInsets.only(left: 4),
+                child: Icon(Icons.check_circle, size: 12, color: _kSuccessBadge),
+              )
+            else if (decision == false)
+              const Padding(
+                padding: EdgeInsets.only(left: 4),
+                child: Icon(Icons.cancel, size: 12, color: _kSubtext),
               ),
-            // Badges for findings on this node
-            for (final f in findings)
-              Padding(
-                padding: const EdgeInsets.only(right: 3),
-                child: _FindingTypeBadge(type: f.findingType, small: true),
-              ),
-            const SizedBox(width: 8),
           ],
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _DetailDrawerOverlay
+// ---------------------------------------------------------------------------
+
+class _DetailDrawerOverlay extends StatefulWidget {
+  const _DetailDrawerOverlay({
+    required this.finding,
+    required this.decision,
+    required this.destinationOverride,
+    required this.onAccept,
+    required this.onReject,
+    required this.onClose,
+    required this.onDestinationChanged,
+  });
+
+  final RationalizeFinding finding;
+  final bool? decision;
+  final String? destinationOverride;
+  final VoidCallback onAccept;
+  final VoidCallback onReject;
+  final VoidCallback onClose;
+  final void Function(String) onDestinationChanged;
+
+  @override
+  State<_DetailDrawerOverlay> createState() => _DetailDrawerOverlayState();
+}
+
+class _DetailDrawerOverlayState extends State<_DetailDrawerOverlay> {
+  late final TextEditingController _nameController;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(
+        text: _suggestedName(widget.finding, widget.destinationOverride));
+  }
+
+  @override
+  void didUpdateWidget(_DetailDrawerOverlay old) {
+    super.didUpdateWidget(old);
+    if (old.finding.id != widget.finding.id) {
+      _nameController.text =
+          _suggestedName(widget.finding, widget.destinationOverride);
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  static String _suggestedName(RationalizeFinding f, String? override) {
+    if (override != null && override.isNotEmpty) {
+      return override.split('/').last;
+    }
+    final dest = f.destination ?? f.absoluteDestination ?? '';
+    return dest.isNotEmpty ? dest.split('/').last : '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final f = widget.finding;
+    final isRename = f.action == FindingAction.rename;
+    final accepted = widget.decision == true;
+    final rejected = widget.decision == false;
+    // null = default applied state (Panel B)
+    final isDefault = widget.decision == null;
+
+    return Positioned(
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: 340,
+      child: Container(
+        decoration: BoxDecoration(
+          color: _kPanelBg,
+          border: Border(left: BorderSide(color: _kDivider)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.45),
+              blurRadius: 16,
+              offset: const Offset(-4, 0),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Container(
+              height: 44,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: _kDivider))),
+              child: Row(
+                children: [
+                  _FindingTypeBadge(type: f.findingType),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      f.displayName,
+                      style: const TextStyle(
+                          color: _kText,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 16, color: _kSubtext),
+                    onPressed: widget.onClose,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+            ),
+
+            // Body
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Type + severity
+                    Row(
+                      children: [
+                        Text(
+                          f.severity == FindingSeverity.issue
+                              ? 'Issue'
+                              : 'Warning',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: f.severity == FindingSeverity.issue
+                                ? _kIssueBadge
+                                : _kWarningBadge,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(f.findingType.label,
+                            style: const TextStyle(
+                                color: _kSubtext, fontSize: 11)),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+
+                    _DrawerField(label: 'Current path', value: f.path),
+                    const SizedBox(height: 10),
+                    _DrawerField(
+                        label: 'Proposed action',
+                        value: _actionDescription(f)),
+
+                    if (isRename) ...[
+                      const SizedBox(height: 12),
+                      const Text('New name',
+                          style: TextStyle(
+                              color: _kSubtext,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500)),
+                      const SizedBox(height: 4),
+                      TextField(
+                        controller: _nameController,
+                        style:
+                            const TextStyle(color: _kText, fontSize: 12),
+                        onChanged: widget.onDestinationChanged,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 8),
+                          filled: true,
+                          fillColor: const Color(0xFF3C3C3C),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(4),
+                            borderSide:
+                                const BorderSide(color: _kDivider),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(4),
+                            borderSide:
+                                const BorderSide(color: _kDivider),
+                          ),
+                        ),
+                      ),
+                    ],
+
+                    if (f.inferenceBasis.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      const Text('Why?',
+                          style: TextStyle(
+                              color: _kSubtext,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500)),
+                      const SizedBox(height: 4),
+                      Text(f.inferenceBasis,
+                          style: const TextStyle(
+                              color: _kText, fontSize: 12)),
+                    ],
+
+                    if (f.triggeredBy != null) ...[
+                      const SizedBox(height: 12),
+                      const Row(
+                        children: [
+                          Icon(Icons.account_tree,
+                              size: 12, color: _kSubtext),
+                          SizedBox(width: 4),
+                          Text('Cascaded from parent finding',
+                              style: TextStyle(
+                                  color: _kSubtext, fontSize: 11)),
+                        ],
+                      ),
+                    ],
+
+                    // Current decision status
+                    if (!isDefault) ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Icon(
+                            accepted ? Icons.check_circle : Icons.cancel,
+                            size: 12,
+                            color: accepted ? _kSuccessBadge : _kSubtext,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            accepted
+                                ? 'Explicitly accepted'
+                                : 'Rejected — folder restored in target',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: accepted ? _kSuccessBadge : _kSubtext,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Applied by default — reject to revert',
+                        style: TextStyle(color: _kSubtext, fontSize: 11),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+
+            // Accept / Reject buttons
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: _kDivider))),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor:
+                            rejected ? _kIssueBadge : _kSubtext,
+                        side: BorderSide(
+                            color: rejected ? _kIssueBadge : _kDivider),
+                      ),
+                      onPressed: widget.onReject,
+                      child: const Text('Reject',
+                          style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor:
+                            accepted ? _kSuccessBadge : _kBlue,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: widget.onAccept,
+                      child: Text(
+                        accepted ? 'Accepted ✓' : 'Accept',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _actionDescription(RationalizeFinding f) => switch (f.action) {
+        FindingAction.remove => 'Remove → Quarantine',
+        FindingAction.rename => () {
+            final dest =
+                widget.destinationOverride ?? f.destination ?? '';
+            final name =
+                dest.isNotEmpty ? dest.split('/').last : '(suggested name)';
+            return 'Rename to "$name"';
+          }(),
+        FindingAction.move => () {
+            final dest =
+                widget.destinationOverride ?? f.destination ?? '';
+            return 'Move to $dest';
+          }(),
+      };
+}
+
+// ---------------------------------------------------------------------------
+// _DrawerField
+// ---------------------------------------------------------------------------
+
+class _DrawerField extends StatelessWidget {
+  const _DrawerField({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label,
+            style: const TextStyle(
+                color: _kSubtext,
+                fontSize: 11,
+                fontWeight: FontWeight.w500)),
+        const SizedBox(height: 2),
+        Text(value, style: const TextStyle(color: _kText, fontSize: 12)),
+      ],
     );
   }
 }
@@ -1309,15 +1348,15 @@ class _TreeRow extends StatelessWidget {
 
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
-    required this.selectedCount,
-    required this.totalVisible,
-    required this.onPreview,
+    required this.pendingCount,
+    required this.rejectedCount,
+    required this.onAcceptAll,
     required this.onApply,
   });
 
-  final int selectedCount;
-  final int totalVisible;
-  final VoidCallback? onPreview;
+  final int pendingCount;
+  final int rejectedCount;
+  final VoidCallback onAcceptAll;
   final VoidCallback? onApply;
 
   @override
@@ -1325,38 +1364,39 @@ class _BottomBar extends StatelessWidget {
     return Container(
       height: 44,
       color: _kPanelBg,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
           Text(
-            selectedCount > 0
-                ? '$selectedCount of $totalVisible selected'
-                : '$totalVisible finding${totalVisible != 1 ? 's' : ''}',
+            '$pendingCount change${pendingCount != 1 ? 's' : ''} pending',
             style: const TextStyle(color: _kSubtext, fontSize: 12),
           ),
+          if (rejectedCount > 0) ...[
+            const Text(' · ',
+                style: TextStyle(color: _kSubtext, fontSize: 12)),
+            Text('$rejectedCount rejected',
+                style: const TextStyle(color: _kSubtext, fontSize: 12)),
+          ],
           const Spacer(),
           TextButton(
             style: TextButton.styleFrom(foregroundColor: _kText),
-            onPressed: onPreview,
-            child: const Text('Preview Changes',
+            onPressed: onAcceptAll,
+            child: const Text('Accept All',
                 style: TextStyle(fontSize: 12)),
           ),
           const SizedBox(width: 8),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor:
-                  onApply != null ? _kBlue : _kDivider,
+              backgroundColor: onApply != null ? _kBlue : _kDivider,
               foregroundColor: Colors.white,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 16, vertical: 8),
               minimumSize: Size.zero,
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
             onPressed: onApply,
             child: Text(
-              selectedCount > 0
-                  ? 'Apply Selected ($selectedCount)'
-                  : 'Apply Selected',
+              'Apply $pendingCount Change${pendingCount != 1 ? 's' : ''}',
               style: const TextStyle(fontSize: 12),
             ),
           ),
@@ -1367,111 +1407,32 @@ class _BottomBar extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// _PreviewRow
-// ---------------------------------------------------------------------------
-
-class _PreviewRow extends StatelessWidget {
-  const _PreviewRow({
-    required this.finding,
-    required this.effectiveDestination,
-  });
-
-  final RationalizeFinding finding;
-  final String effectiveDestination;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: _kPanelBg,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: _kDivider),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _FindingTypeBadge(type: finding.findingType),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(finding.displayName,
-                    style: const TextStyle(
-                        color: _kText,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500)),
-                const SizedBox(height: 2),
-                Text(
-                  _actionSummary,
-                  style:
-                      const TextStyle(color: _kSubtext, fontSize: 11),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String get _actionSummary {
-    switch (finding.action) {
-      case FindingAction.remove:
-        return '→ Move to quarantine';
-      case FindingAction.rename:
-        final name = effectiveDestination.split('/').last;
-        return '→ Rename to "$name"';
-      case FindingAction.move:
-        return '→ Move to $effectiveDestination';
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // _FindingTypeBadge
 // ---------------------------------------------------------------------------
 
 class _FindingTypeBadge extends StatelessWidget {
-  const _FindingTypeBadge({required this.type, this.small = false});
+  const _FindingTypeBadge({required this.type});
 
   final FindingType type;
-  final bool small;
 
-  Color get _color {
-    switch (type) {
-      case FindingType.emptyFolder:
-        return _kIssueBadge;
-      case FindingType.namingInconsistency:
-        return _kIssueBadge;
-      case FindingType.misplacedFile:
-        return _kWarningBadge;
-      case FindingType.excessiveNesting:
-        return _kWarningBadge;
-    }
-  }
+  Color get _color => switch (type) {
+        FindingType.emptyFolder => _kIssueBadge,
+        FindingType.namingInconsistency => _kIssueBadge,
+        FindingType.misplacedFile => _kWarningBadge,
+        FindingType.excessiveNesting => _kWarningBadge,
+      };
 
-  String get _label {
-    switch (type) {
-      case FindingType.emptyFolder:
-        return small ? 'E' : 'empty';
-      case FindingType.namingInconsistency:
-        return small ? 'N' : 'naming';
-      case FindingType.misplacedFile:
-        return small ? 'M' : 'misplaced';
-      case FindingType.excessiveNesting:
-        return small ? 'D' : 'nesting';
-    }
-  }
+  String get _label => switch (type) {
+        FindingType.emptyFolder => 'empty',
+        FindingType.namingInconsistency => 'naming',
+        FindingType.misplacedFile => 'misplaced',
+        FindingType.excessiveNesting => 'nesting',
+      };
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.symmetric(
-          horizontal: small ? 4 : 6,
-          vertical: small ? 1 : 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: _color.withValues(alpha: 0.2),
         borderRadius: BorderRadius.circular(3),
@@ -1481,57 +1442,8 @@ class _FindingTypeBadge extends StatelessWidget {
         _label,
         style: TextStyle(
           color: _color,
-          fontSize: small ? 9 : 10,
+          fontSize: 10,
           fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// _TriStateCheckbox — custom visible checkbox for dark backgrounds
-// ---------------------------------------------------------------------------
-
-class _TriStateCheckbox extends StatelessWidget {
-  const _TriStateCheckbox({
-    required this.checked,
-    required this.indeterminate,
-    required this.onTap,
-  });
-
-  final bool checked;
-  final bool indeterminate;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 16,
-        height: 16,
-        decoration: BoxDecoration(
-          color: (checked || indeterminate) ? _kBlue : Colors.transparent,
-          borderRadius: BorderRadius.circular(3),
-          border: Border.all(
-            color: (checked || indeterminate)
-                ? _kBlue
-                : const Color(0xFF6E6E6E),
-            width: 1.5,
-          ),
-        ),
-        child: Center(
-          child: indeterminate
-              ? Container(
-                  width: 8,
-                  height: 2,
-                  color: Colors.white,
-                )
-              : checked
-                  ? const Icon(Icons.check,
-                      size: 11, color: Colors.white)
-                  : null,
         ),
       ),
     );
