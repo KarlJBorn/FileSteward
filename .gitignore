@@ -49,6 +49,9 @@ app.*.map.json
 /agent_board_status/
 /dev_status/
 
-# Claude Code workspace
-/.claude/
+# Claude Code workspace — ignore runtime/local files but track shared project settings
+/.claude/worktrees/
+/.claude/settings.local.json
+/.claude/launch.json
+/.claude/.DS_Store
 .filesteward_manifest.json
