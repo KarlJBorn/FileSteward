@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git push:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(flutter test:*)",
+      "Bash(flutter build:*)",
+      "Bash(make check:*)",
+      "Bash(make test:*)",
+      "Bash(make rust-build:*)",
+      "Bash(make flutter-run:*)"
+    ]
+  },
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -C /Users/karlborn/Development/projects/FileSteward checkout main && git -C /Users/karlborn/Development/projects/FileSteward pull origin main",
+            "statusMessage": "Pulling latest main before creating worktree...",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
