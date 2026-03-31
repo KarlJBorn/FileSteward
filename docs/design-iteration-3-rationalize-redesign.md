@@ -1,7 +1,7 @@
 # FileSteward: Iteration 3 Rationalize Screen — Redesign
 
 ## Status
-Planning. Not yet implemented.
+Approved. Ready for implementation.
 
 **Supersedes:** [`design-iteration-3.md`](design-iteration-3.md) (UI design section only — engine, execution, and log design remain valid)
 
@@ -90,28 +90,28 @@ A static mockup would answer visual design questions but not the performance que
 
 ---
 
-## Open Design Questions
-
-These were not resolved in the planning session and must be decided before implementation begins.
+## Design Decisions (resolved in planning)
 
 ### 1. Row alignment when right panel has gaps
-When a folder is absent from the right panel, the rows below it shift up, breaking alignment with the left panel. Options:
-- **Accept misalignment** — honest representation, but potentially disorienting at scale
-- **Insert invisible placeholder rows** — maintains alignment, but adds complexity and may be confusing if users try to click the empty space
-- **Fade/collapse the gap** — animate the gap closed; right panel becomes a compressed view of the target, not a spatial mirror
+**Decision: Drop synchronized scrolling. Right panel is its own clean view.**
 
-This is the most significant open question. Needs a prototype to evaluate.
+When a folder is absent from the right panel, rows shift up and alignment with the left panel breaks. Rather than hiding this with placeholder rows or accepting a broken spatial mirror, the right panel stands on its own terms — a clean representation of the target state, not locked to the left panel's row positions. Synchronized scrolling is removed. Each panel scrolls independently.
+
+Rationale: if alignment breaks at the first removal, synchronized scrolling is already misleading. A clean independent right panel is more honest and less confusing. Complexity can be added in a future iteration if users find the panels hard to cross-reference.
 
 ### 2. Files in both panels
-The original Rationalize screen was folder-level only. The redesign shows files alongside folders. Questions:
-- Are files shown at all nesting levels, or collapsed by default?
-- Are files colour-coded for findings (e.g. misplaced file type)?
-- If a file is proposed for removal (Iteration 4 territory), does it appear absent in the right panel?
+**Decision: Files collapsed by default. Folders shown first, files visible on demand via expand toggle.**
 
-For now: files are shown, not colour-coded, not interactive. File-level actions are Iteration 4.
+The Rationalize screen is about folder structure. File-level actions are Iteration 4. Showing thousands of files by default at 200+ folders makes the tree unreadable. Users expand a folder to see its files when they need to.
 
-### 3. Colour coding legibility when most rows are clean
-With 181 findings across 200+ folders, most rows will be unflagged. The concern from testing: colour-coded rows stand out too much or not enough depending on density. This must be validated against real scan data before the palette is finalised.
+Files are not colour-coded and not interactive in this iteration.
+
+Also filed: [#51](https://github.com/KarlJBorn/FileSteward/issues/51) — lone file in single-purpose folder as a future finding type.
+
+### 3. Colour palette
+**Decision: Named constants from day one, tuned after real-data validation.**
+
+The three finding colours (red=remove, orange=rename, blue=move) are defined as named constants rather than inline values, so the entire palette is a one-line change. Legibility will be validated by running against `Born_Family_2000_01_24` (200+ folders, 181 findings) and tuning from there.
 
 ---
 
