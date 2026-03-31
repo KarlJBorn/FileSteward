@@ -1453,8 +1453,13 @@ mod tests {
     fn test_execute_move_conflict_fails() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let src = make_dir(root, "source");
-        let dest = make_dir(root, "dest"); // already exists
+        // src and dest must be in different parent directories so the engine
+        // treats this as a move (not a rename). Same-parent collisions are
+        // auto-suffixed; cross-parent collisions are reported as conflicts.
+        let src_dir = make_dir(root, "src_parent");
+        let dest_dir = make_dir(root, "dest_parent");
+        let src = make_dir(&src_dir, "folder");
+        let dest = make_dir(&dest_dir, "folder"); // already exists in dest_parent
         let (outcome, error, _) = execute_move(&src, &dest);
         assert_eq!(outcome, "failed");
         assert!(error.is_some());
