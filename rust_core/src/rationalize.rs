@@ -27,6 +27,47 @@ const METADATA_FILES: &[&str] = &[".DS_Store", ".localized", "Thumbs.db", ".gitk
 /// Folder depth threshold. Folders deeper than this are flagged.
 const NESTING_DEPTH_THRESHOLD: usize = 5;
 
+/// Folder names that are OS-reserved or have well-known conventional meaning
+/// and must never be proposed for rename. Exact match, case-sensitive.
+const RESERVED_FOLDER_NAMES: &[&str] = &[
+    // Generic OS / build conventions
+    "TEMP", "TMP", "CACHE", "BACKUP", "RESTORE", "CONFIG",
+    "BIN", "LIB", "SRC", "LOG", "LOGS", "DIST", "BUILD", "OUT",
+    // macOS system directories
+    ".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd",
+    // Windows shell / profile folders (named system folders — #57)
+    "Application Data", "Local Settings", "My Documents", "My Music",
+    "My Pictures", "My Videos", "My Recent Documents", "Recent",
+    "NetHood", "PrintHood", "SendTo", "Start Menu", "Templates",
+    "Cookies", "History", "Temporary Internet Files", "Quick Launch",
+    "Desktop", "Favorites", "Fonts", "Identities",
+];
+
+/// Regex pattern for Windows COM/OLE GUID-named folders:
+/// {8hex-4hex-4hex-4hex-12hex}. These are categorically not user data
+/// and are skipped entirely during scan (Option A from issue #57).
+fn is_guid_folder(name: &str) -> bool {
+    if name.len() != 38 {
+        return false;
+    }
+    let b = name.as_bytes();
+    b[0] == b'{'
+        && b[37] == b'}'
+        && is_hex_block(&name[1..9])
+        && b[9] == b'-'
+        && is_hex_block(&name[10..14])
+        && b[14] == b'-'
+        && is_hex_block(&name[15..19])
+        && b[19] == b'-'
+        && is_hex_block(&name[20..24])
+        && b[24] == b'-'
+        && is_hex_block(&name[25..37])
+}
+
+fn is_hex_block(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 // ---------------------------------------------------------------------------
 // Internal scan model
 // ---------------------------------------------------------------------------
@@ -254,6 +295,10 @@ fn scan_directory(
         };
 
         if metadata.is_dir() {
+            // Skip GUID folders entirely — COM/OLE artifacts, never user data (#57).
+            if is_guid_folder(&entry_name) {
+                continue;
+            }
             child_folder_count += 1;
             child_dirs.push(path);
         } else if metadata.is_file() {
@@ -618,8 +663,8 @@ fn generate_findings(root: &Path, folders: &[FolderNode]) -> Vec<Finding> {
 
         // ── naming_inconsistency ──────────────────────────────────────────
         // Only when the folder has no other findings (already flagged empty folders
-        // don't need a rename proposal too).
-        if !is_empty {
+        // don't need a rename proposal too). Reserved names are never renamed.
+        if !is_empty && !RESERVED_FOLDER_NAMES.contains(&folder.name.as_str()) {
             if let Some(parent_key) = &folder.parent_relative_path {
                 if let Some(&dominant) = dominant_by_parent.get(parent_key) {
                     if let Some(renamed) = suggest_rename(&folder.name, dominant) {
@@ -863,24 +908,66 @@ fn execute_remove(
     }
 
     if dest.exists() {
+        // Already quarantined in a prior session — source is gone. Report skipped.
         return (
-            "failed".to_string(),
-            Some("Quarantine destination already exists".to_string()),
+            "skipped".to_string(),
+            Some("Already quarantined in a prior session".to_string()),
             dest.to_string_lossy().into_owned(),
         );
     }
 
-    match fs::rename(src, &dest) {
-        Ok(()) => ("succeeded".to_string(), None, dest.to_string_lossy().into_owned()),
-        Err(e) => (
-            "failed".to_string(),
-            Some(e.to_string()),
-            dest.to_string_lossy().into_owned(),
-        ),
+    move_with_cross_device_fallback(src, &dest)
+}
+
+/// Rename src → dest, falling back to copy-then-delete when source and
+/// destination are on different filesystems (EXDEV / os error 18). (#59)
+fn move_with_cross_device_fallback(
+    src: &Path,
+    dest: &Path,
+) -> (String, Option<String>, String) {
+    let dest_str = dest.to_string_lossy().into_owned();
+    match fs::rename(src, dest) {
+        Ok(()) => ("succeeded".to_string(), None, dest_str),
+        Err(e) if e.raw_os_error() == Some(18) => {
+            // Cross-device: copy then delete.
+            match copy_dir_all(src, dest) {
+                Ok(()) => match fs::remove_dir_all(src) {
+                    Ok(()) => ("succeeded".to_string(), None, dest_str),
+                    Err(re) => (
+                        "failed".to_string(),
+                        Some(format!("Copied but could not remove source: {}", re)),
+                        dest_str,
+                    ),
+                },
+                Err(ce) => (
+                    "failed".to_string(),
+                    Some(format!("Cross-device copy failed: {}", ce)),
+                    dest_str,
+                ),
+            }
+        }
+        Err(e) => ("failed".to_string(), Some(e.to_string()), dest_str),
     }
 }
 
+/// Recursively copy a directory tree from src to dest.
+fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dest.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), dest.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Rename or move `src` to `dest`. Creates destination parent directories.
+/// For renames (same parent), auto-suffixes if dest already exists (#59).
+/// For moves (different parent), reports conflict if dest already exists.
 fn execute_move(src: &Path, dest: &Path) -> (String, Option<String>, String) {
     if !src.exists() {
         return (
@@ -890,32 +977,57 @@ fn execute_move(src: &Path, dest: &Path) -> (String, Option<String>, String) {
         );
     }
 
-    if dest.exists() {
-        return (
-            "failed".to_string(),
-            Some("Destination already exists".to_string()),
-            dest.to_string_lossy().into_owned(),
-        );
-    }
+    // Resolve the actual destination, handling collisions.
+    let actual_dest = if dest.exists() {
+        let is_rename = src.parent() == dest.parent();
+        if is_rename {
+            // Auto-suffix: try _2, _3, … until free.
+            match find_available_suffixed(dest) {
+                Some(d) => d,
+                None => {
+                    return (
+                        "failed".to_string(),
+                        Some("Could not find available suffixed destination".to_string()),
+                        dest.to_string_lossy().into_owned(),
+                    )
+                }
+            }
+        } else {
+            // Move collision — report conflict, leave source untouched.
+            return (
+                "failed".to_string(),
+                Some("Destination already exists — move conflict requires manual resolution".to_string()),
+                dest.to_string_lossy().into_owned(),
+            );
+        }
+    } else {
+        dest.to_path_buf()
+    };
 
-    if let Some(parent) = dest.parent() {
+    if let Some(parent) = actual_dest.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             return (
                 "failed".to_string(),
                 Some(format!("Could not create destination directory: {}", e)),
-                dest.to_string_lossy().into_owned(),
+                actual_dest.to_string_lossy().into_owned(),
             );
         }
     }
 
-    match fs::rename(src, dest) {
-        Ok(()) => ("succeeded".to_string(), None, dest.to_string_lossy().into_owned()),
-        Err(e) => (
-            "failed".to_string(),
-            Some(e.to_string()),
-            dest.to_string_lossy().into_owned(),
-        ),
+    move_with_cross_device_fallback(src, &actual_dest)
+}
+
+/// Find the first available path by appending _2, _3, … to the stem.
+fn find_available_suffixed(dest: &Path) -> Option<PathBuf> {
+    let parent = dest.parent()?;
+    let stem = dest.file_name()?.to_string_lossy().into_owned();
+    for n in 2u32..=99 {
+        let candidate = parent.join(format!("{}_{}", stem, n));
+        if !candidate.exists() {
+            return Some(candidate);
+        }
     }
+    None
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,8 @@ const _kSuccessBadge = Color(0xFF16825D);
 const _kRemoveColor = Color(0xFFCD3131); // red — proposed removal
 const _kRenameColor = Color(0xFFCCA700); // orange — proposed rename
 const _kMoveColor = Color(0xFF4FC1FF); // blue — proposed move
-const _kRenameTargetColor = Color(0xFF89D185); // green italic — target panel
+const _kRenameTargetColor = Color(0xFF89D185); // green italic — rename in target panel
+const _kCollisionSuffixColor = Color(0xFFD7BA7D); // amber italic — auto-suffixed rename collision
 const _kUserRemoveColor = Color(0xFFCD3131); // same red — user-initiated removal
 
 // ---------------------------------------------------------------------------
