@@ -180,6 +180,42 @@ class DirectoryEntry {
   }
 }
 
+// ---------------------------------------------------------------------------
+// DuplicateGroup — one set of identical files with a suggested keeper (#83)
+// ---------------------------------------------------------------------------
+
+class DuplicateGroup {
+  /// All relative paths in this group (sorted).
+  final List<String> paths;
+
+  /// Path the engine recommends keeping.
+  final String suggestedKeep;
+
+  /// Human-readable reasons explaining the choice.
+  final List<String> reasons;
+
+  /// True when the engine cannot determine a clear winner — user must choose.
+  final bool ambiguous;
+
+  const DuplicateGroup({
+    required this.paths,
+    required this.suggestedKeep,
+    required this.reasons,
+    required this.ambiguous,
+  });
+
+  factory DuplicateGroup.fromJson(Map<String, dynamic> json) {
+    final rawPaths = json['paths'] as List<dynamic>? ?? [];
+    final rawReasons = json['reasons'] as List<dynamic>? ?? [];
+    return DuplicateGroup(
+      paths: rawPaths.map((e) => e as String).toList(),
+      suggestedKeep: json['suggested_keep'] as String? ?? '',
+      reasons: rawReasons.map((e) => e as String).toList(),
+      ambiguous: json['ambiguous'] as bool? ?? false,
+    );
+  }
+}
+
 class FindingsPayload {
   final String selectedFolder;
   final String scannedAt;
@@ -187,6 +223,7 @@ class FindingsPayload {
   final List<RationalizeFinding> findings;
   final List<ScanErrorEntry> errors;
   final List<DirectoryEntry> entries;
+  final List<DuplicateGroup> duplicateGroups;
 
   const FindingsPayload({
     required this.selectedFolder,
@@ -195,12 +232,14 @@ class FindingsPayload {
     required this.findings,
     required this.errors,
     required this.entries,
+    this.duplicateGroups = const [],
   });
 
   factory FindingsPayload.fromJson(Map<String, dynamic> json) {
     final rawFindings = json['findings'] as List<dynamic>? ?? [];
     final rawErrors = json['errors'] as List<dynamic>? ?? [];
     final rawEntries = json['entries'] as List<dynamic>? ?? [];
+    final rawGroups = json['duplicate_groups'] as List<dynamic>? ?? [];
     return FindingsPayload(
       selectedFolder: json['selected_folder'] as String? ?? '',
       scannedAt: json['scanned_at'] as String? ?? '',
@@ -214,6 +253,9 @@ class FindingsPayload {
           .toList(),
       entries: rawEntries
           .map((e) => DirectoryEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      duplicateGroups: rawGroups
+          .map((e) => DuplicateGroup.fromJson(e as Map<String, dynamic>))
           .toList(),
     );
   }

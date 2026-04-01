@@ -113,6 +113,11 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // Currently open detail drawer finding id.
   String? _drawerFindingId;
 
+  // Duplicate group decisions: group index → chosen path to keep.
+  // Auto-resolved groups are pre-filled with suggestedKeep.
+  // Ambiguous groups start as null (user must choose before Apply).
+  final Map<int, String?> _duplicateChoices = {};
+
   // Build phase state
   BuildResult? _buildResult;
   int _buildFoldersDone = 0;
@@ -142,6 +147,19 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
 
   /// Count of explicitly rejected findings.
   int get _rejectedCount => _rejectedIds.length;
+
+  /// Count of ambiguous duplicate groups the user has not yet resolved.
+  int get _ambiguousUnresolvedCount {
+    final p = _payload;
+    if (p == null) return 0;
+    var count = 0;
+    for (var i = 0; i < p.duplicateGroups.length; i++) {
+      if (p.duplicateGroups[i].ambiguous && _duplicateChoices[i] == null) {
+        count++;
+      }
+    }
+    return count;
+  }
 
   String _effectiveDestination(RationalizeFinding f) =>
       _destinationOverrides[f.id] ?? f.absoluteDestination ?? '';
@@ -362,9 +380,18 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
             _currentPath = currentPath;
           });
         case RationalizeScanComplete(:final payload):
+          // Pre-fill duplicate choices for auto-resolved groups.
+          final choices = <int, String?>{};
+          for (var i = 0; i < payload.duplicateGroups.length; i++) {
+            final g = payload.duplicateGroups[i];
+            choices[i] = g.ambiguous ? null : g.suggestedKeep;
+          }
           setState(() {
             _payload = payload;
             _phase = _Phase.findings;
+            _duplicateChoices
+              ..clear()
+              ..addAll(choices);
           });
         case RationalizeError(:final message):
           _showError(message);
@@ -782,11 +809,24 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
             ],
           ),
         ),
+        // Duplicate groups panel — only shown when duplicates were found.
+        if (payload.duplicateGroups.isNotEmpty) ...[
+          Container(height: 1, color: _kDivider),
+          _DuplicateGroupsPanel(
+            groups: payload.duplicateGroups,
+            choices: _duplicateChoices,
+            onChoiceChanged: (index, path) =>
+                setState(() => _duplicateChoices[index] = path),
+          ),
+        ],
         Container(height: 1, color: _kDivider),
         _BottomBar(
           pendingCount: _pendingCount,
           rejectedCount: _rejectedCount,
-          onApply: _pendingCount > 0 ? _applyChanges : null,
+          ambiguousUnresolved: _ambiguousUnresolvedCount,
+          onApply: (_pendingCount > 0 && _ambiguousUnresolvedCount == 0)
+              ? _applyChanges
+              : null,
           onDone: () => Navigator.of(context).pop(),
         ),
       ],
@@ -1764,12 +1804,14 @@ class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.pendingCount,
     required this.rejectedCount,
+    required this.ambiguousUnresolved,
     required this.onApply,
     required this.onDone,
   });
 
   final int pendingCount;
   final int rejectedCount;
+  final int ambiguousUnresolved;
   final VoidCallback? onApply;
   final VoidCallback onDone;
 
@@ -1793,6 +1835,14 @@ class _BottomBar extends StatelessWidget {
                 style: TextStyle(color: _kSubtext, fontSize: 12)),
             Text('$rejectedCount rejected',
                 style: const TextStyle(color: _kSubtext, fontSize: 12)),
+          ],
+          if (ambiguousUnresolved > 0) ...[
+            const Text(' · ',
+                style: TextStyle(color: _kSubtext, fontSize: 12)),
+            Text(
+              '$ambiguousUnresolved duplicate${ambiguousUnresolved != 1 ? 's' : ''} need input',
+              style: const TextStyle(color: _kWarningBadge, fontSize: 12),
+            ),
           ],
           const Spacer(),
           const SizedBox(width: 8),
@@ -1824,6 +1874,307 @@ class _BottomBar extends StatelessWidget {
               child: const Text('Done', style: TextStyle(fontSize: 12)),
             ),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _DuplicateGroupsPanel — shows duplicate groups below the tree panels
+// ---------------------------------------------------------------------------
+
+class _DuplicateGroupsPanel extends StatefulWidget {
+  const _DuplicateGroupsPanel({
+    required this.groups,
+    required this.choices,
+    required this.onChoiceChanged,
+  });
+
+  final List<DuplicateGroup> groups;
+
+  /// Current keeper choice per group index. Null = unresolved (ambiguous only).
+  final Map<int, String?> choices;
+
+  final void Function(int index, String path) onChoiceChanged;
+
+  @override
+  State<_DuplicateGroupsPanel> createState() => _DuplicateGroupsPanelState();
+}
+
+class _DuplicateGroupsPanelState extends State<_DuplicateGroupsPanel> {
+  bool _autoResolvedExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ambiguous = <(int, DuplicateGroup)>[];
+    final autoResolved = <(int, DuplicateGroup)>[];
+    for (var i = 0; i < widget.groups.length; i++) {
+      final g = widget.groups[i];
+      if (g.ambiguous) {
+        ambiguous.add((i, g));
+      } else {
+        autoResolved.add((i, g));
+      }
+    }
+
+    return Container(
+      color: _kPanelBg,
+      constraints: const BoxConstraints(maxHeight: 220),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header row
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.copy_all, size: 13, color: _kSubtext),
+                const SizedBox(width: 6),
+                Text(
+                  'Duplicate Files',
+                  style: const TextStyle(
+                      color: _kText, fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${widget.groups.length} group${widget.groups.length != 1 ? 's' : ''}',
+                  style: const TextStyle(color: _kSubtext, fontSize: 11),
+                ),
+                if (autoResolved.isNotEmpty) ...[
+                  const Text(' · ', style: TextStyle(color: _kSubtext, fontSize: 11)),
+                  Text(
+                    '${autoResolved.length} auto-resolved',
+                    style: const TextStyle(color: _kSubtext, fontSize: 11),
+                  ),
+                ],
+                if (ambiguous.isNotEmpty) ...[
+                  const Text(' · ', style: TextStyle(color: _kSubtext, fontSize: 11)),
+                  Text(
+                    '${ambiguous.length} need input',
+                    style: const TextStyle(color: _kWarningBadge, fontSize: 11),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          Container(height: 1, color: _kDivider),
+          // Scrollable group list
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Ambiguous groups first — user must resolve these
+                  for (final (i, g) in ambiguous)
+                    _DuplicateGroupCard(
+                      index: i,
+                      group: g,
+                      choice: widget.choices[i],
+                      onChoiceChanged: widget.onChoiceChanged,
+                    ),
+                  // Auto-resolved groups — collapsible
+                  if (autoResolved.isNotEmpty) ...[
+                    if (ambiguous.isNotEmpty) const SizedBox(height: 4),
+                    GestureDetector(
+                      onTap: () => setState(
+                          () => _autoResolvedExpanded = !_autoResolvedExpanded),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _autoResolvedExpanded
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                            size: 14,
+                            color: _kSubtext,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${autoResolved.length} auto-resolved — tap to ${_autoResolvedExpanded ? 'hide' : 'review'}',
+                            style: const TextStyle(
+                                color: _kSubtext, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_autoResolvedExpanded) ...[
+                      const SizedBox(height: 4),
+                      for (final (i, g) in autoResolved)
+                        _DuplicateGroupCard(
+                          index: i,
+                          group: g,
+                          choice: widget.choices[i],
+                          onChoiceChanged: widget.onChoiceChanged,
+                        ),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DuplicateGroupCard extends StatelessWidget {
+  const _DuplicateGroupCard({
+    required this.index,
+    required this.group,
+    required this.choice,
+    required this.onChoiceChanged,
+  });
+
+  final int index;
+  final DuplicateGroup group;
+
+  /// Currently chosen path to keep. Null if unresolved (ambiguous only).
+  final String? choice;
+  final void Function(int index, String path) onChoiceChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final filename = group.suggestedKeep.split('/').last;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: _kBg,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(
+          color: group.ambiguous && choice == null
+              ? _kWarningBadge.withValues(alpha: 0.5)
+              : _kDivider,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // File name + ambiguous badge
+          Row(
+            children: [
+              const Icon(Icons.insert_drive_file_outlined,
+                  size: 12, color: _kSubtext),
+              const SizedBox(width: 5),
+              Text(
+                filename,
+                style: const TextStyle(
+                    color: _kText, fontSize: 12, fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(width: 6),
+              if (group.ambiguous)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: _kWarningBadge.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(3),
+                    border: Border.all(
+                        color: _kWarningBadge.withValues(alpha: 0.5)),
+                  ),
+                  child: const Text('needs input',
+                      style:
+                          TextStyle(color: _kWarningBadge, fontSize: 10)),
+                ),
+              const Spacer(),
+              Text(
+                '${group.paths.length} copies',
+                style: const TextStyle(color: _kSubtext, fontSize: 10),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // One row per copy
+          for (final path in group.paths)
+            _CopyRow(
+              path: path,
+              isKept: choice == path,
+              isAutoResolved: !group.ambiguous,
+              onKeep: () => onChoiceChanged(index, path),
+            ),
+          // Reasons (only for auto-resolved with reasons, or ambiguous)
+          if (group.reasons.isNotEmpty && (!group.ambiguous)) ...[
+            const SizedBox(height: 4),
+            Text(
+              group.reasons.first,
+              style:
+                  const TextStyle(color: _kSubtext, fontSize: 10),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CopyRow extends StatelessWidget {
+  const _CopyRow({
+    required this.path,
+    required this.isKept,
+    required this.isAutoResolved,
+    required this.onKeep,
+  });
+
+  final String path;
+  final bool isKept;
+  final bool isAutoResolved;
+  final VoidCallback onKeep;
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = path.split('/');
+    final filename = parts.last;
+    final folder =
+        parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '';
+
+    return GestureDetector(
+      onTap: onKeep,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        margin: const EdgeInsets.only(bottom: 2),
+        decoration: BoxDecoration(
+          color: isKept
+              ? _kSuccessBadge.withValues(alpha: 0.08)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(3),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              isKept ? Icons.check_circle_outline : Icons.radio_button_unchecked,
+              size: 12,
+              color: isKept ? _kSuccessBadge : _kSubtext,
+            ),
+            const SizedBox(width: 6),
+            if (folder.isNotEmpty) ...[
+              Text(
+                '$folder/',
+                style: const TextStyle(color: _kSubtext, fontSize: 11),
+              ),
+            ],
+            Text(
+              filename,
+              style: TextStyle(
+                color: isKept ? _kSuccessBadge : _kText,
+                fontSize: 11,
+                decoration: isKept ? null : TextDecoration.none,
+              ),
+            ),
+            if (isKept) ...[
+              const SizedBox(width: 6),
+              Text(
+                isAutoResolved ? 'keep' : 'keep ✓',
+                style: const TextStyle(
+                    color: _kSuccessBadge,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
