@@ -295,6 +295,28 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   void _unmarkForRemoval(String relativePath) =>
       setState(() => _userRemovedPaths.remove(relativePath));
 
+  /// Returns all engine findings whose path falls under [prefix].
+  List<RationalizeFinding> _findingsUnder(String prefix) {
+    final p = _payload;
+    if (p == null) return [];
+    return p.findings.where((f) =>
+        f.path == prefix || f.path.startsWith('$prefix/')).toList();
+  }
+
+  void _rejectSubtree(String prefix) => setState(() {
+        for (final f in _findingsUnder(prefix)) {
+          _decisions[f.id] = false;
+        }
+        _drawerFindingId = null;
+      });
+
+  void _acceptSubtree(String prefix) => setState(() {
+        for (final f in _findingsUnder(prefix)) {
+          _decisions[f.id] = true;
+        }
+        _drawerFindingId = null;
+      });
+
   void _openDrawer(String id) => setState(() => _drawerFindingId = id);
   void _closeDrawer() => setState(() => _drawerFindingId = null);
 
@@ -480,6 +502,12 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
     final isUserMarked = _userRemovedPaths.containsKey(node.relativePath);
     final decision = finding != null ? _decisions[finding.id] : null;
 
+    final subtreeFindings = _findingsUnder(node.relativePath);
+    final hasActiveInSubtree =
+        subtreeFindings.any((f) => _decisions[f.id] != false);
+    final hasRejectedInSubtree =
+        subtreeFindings.any((f) => _decisions[f.id] == false);
+
     showMenu<String>(
       context: ctx,
       position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + 1, pos.dy + 1),
@@ -515,6 +543,25 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
             style: const TextStyle(fontSize: 13),
           ),
         ),
+        if (subtreeFindings.length > 1) ...[
+          const PopupMenuDivider(),
+          if (hasActiveInSubtree)
+            PopupMenuItem(
+              value: 'reject_subtree',
+              child: Text(
+                'Reject all findings in subtree (${subtreeFindings.length})',
+                style: const TextStyle(fontSize: 13, color: _kSubtext),
+              ),
+            ),
+          if (hasRejectedInSubtree)
+            PopupMenuItem(
+              value: 'accept_subtree',
+              child: Text(
+                'Accept all findings in subtree (${subtreeFindings.length})',
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+        ],
       ],
     ).then((value) {
       if (value == null) return;
@@ -524,6 +571,8 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         _markForRemoval(node.relativePath, node.absolutePath);
       }
       if (value == 'unmark') _unmarkForRemoval(node.relativePath);
+      if (value == 'reject_subtree') _rejectSubtree(node.relativePath);
+      if (value == 'accept_subtree') _acceptSubtree(node.relativePath);
     });
   }
 
