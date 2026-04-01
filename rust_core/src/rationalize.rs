@@ -127,12 +127,17 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
-/// Folder names that signal a low-quality destination — files here are likely
-/// unsorted or temporary. Case-insensitive match against each path component.
+/// Folder names that signal a low-quality destination — files here are almost
+/// never the intended permanent home for a file.
+///
+/// Intentionally conservative: only names that are unambiguously temporary or
+/// system-generated. Names like "misc", "inbox", "scratch" are excluded because
+/// they can represent deliberate organizational choices.
+///
+/// TODO (#81): make this list user-configurable in the Settings screen so users
+/// can add or remove entries to match their own folder conventions.
 const JUNK_FOLDER_NAMES: &[&str] = &[
-    "temp", "tmp", "downloads", "desktop", "misc", "miscellaneous",
-    "untitled", "new folder", "backup", "backups", "bak",
-    "unsorted", "inbox", "dump", "scratch",
+    "temp", "tmp", "downloads", "desktop", "untitled", "new folder",
 ];
 
 /// Filename substrings (lowercase) that indicate a copy artifact —
