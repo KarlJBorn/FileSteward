@@ -735,6 +735,7 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
           pendingCount: _pendingCount,
           rejectedCount: _rejectedCount,
           onApply: _pendingCount > 0 ? _applyChanges : null,
+          onDone: () => Navigator.of(context).pop(),
         ),
       ],
     );
@@ -1658,14 +1659,17 @@ class _BottomBar extends StatelessWidget {
     required this.pendingCount,
     required this.rejectedCount,
     required this.onApply,
+    required this.onDone,
   });
 
   final int pendingCount;
   final int rejectedCount;
   final VoidCallback? onApply;
+  final VoidCallback onDone;
 
   @override
   Widget build(BuildContext context) {
+    final hasChanges = pendingCount > 0;
     return Container(
       height: 44,
       color: _kPanelBg,
@@ -1673,7 +1677,9 @@ class _BottomBar extends StatelessWidget {
       child: Row(
         children: [
           Text(
-            '$pendingCount change${pendingCount != 1 ? 's' : ''} pending',
+            hasChanges
+                ? '$pendingCount change${pendingCount != 1 ? 's' : ''} pending'
+                : 'No changes pending',
             style: const TextStyle(color: _kSubtext, fontSize: 12),
           ),
           if (rejectedCount > 0) ...[
@@ -1684,21 +1690,33 @@ class _BottomBar extends StatelessWidget {
           ],
           const Spacer(),
           const SizedBox(width: 8),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: onApply != null ? _kBlue : _kDivider,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 8),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          if (hasChanges)
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kBlue,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: onApply,
+              child: Text(
+                'Apply $pendingCount Change${pendingCount != 1 ? 's' : ''}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            )
+          else
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kSuccessBadge,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: onDone,
+              child: const Text('Done', style: TextStyle(fontSize: 12)),
             ),
-            onPressed: onApply,
-            child: Text(
-              'Apply $pendingCount Change${pendingCount != 1 ? 's' : ''}',
-              style: const TextStyle(fontSize: 12),
-            ),
-          ),
         ],
       ),
     );
