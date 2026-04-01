@@ -7,6 +7,7 @@ import 'manifest_models.dart';
 import 'manifest_service.dart';
 import 'rationalize_screen.dart';
 import 'scan_events.dart';
+import 'splash_screen.dart';
 
 void main() {
   runApp(const FileStewardApp());
@@ -20,7 +21,7 @@ class FileStewardApp extends StatelessWidget {
     return MaterialApp(
       title: 'FileSteward',
       debugShowCheckedModeBanner: false,
-      home: const FileStewardHomePage(),
+      home: const SplashScreen(nextPage: FileStewardHomePage()),
     );
   }
 }
