@@ -76,7 +76,10 @@ class _TreeNode {
 // ---------------------------------------------------------------------------
 
 class RationalizeScreen extends StatefulWidget {
-  const RationalizeScreen({super.key});
+  const RationalizeScreen({super.key, this.initialFolder});
+
+  /// When provided, skips the folder picker and begins scanning immediately.
+  final String? initialFolder;
 
   @override
   State<RationalizeScreen> createState() => _RationalizeScreenState();
@@ -302,10 +305,18 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // Scan
   // ---------------------------------------------------------------------------
 
-  Future<void> _pickFolderAndScan() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.isEmpty || !mounted) return;
+  @override
+  void initState() {
+    super.initState();
+    final folder = widget.initialFolder;
+    if (folder != null && folder.isNotEmpty) {
+      // Defer until after first frame so the widget tree is mounted.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _startScan(folder));
+    }
+  }
 
+  /// Begin a scan for [path], resetting all state first.
+  Future<void> _startScan(String path) async {
     setState(() {
       _selectedFolder = path;
       _phase = _Phase.scanning;
@@ -352,6 +363,13 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
       }
     }
   }
+
+  Future<void> _pickFolderAndScan() async {
+    final path = await getDirectoryPath();
+    if (path == null || path.isEmpty || !mounted) return;
+    await _startScan(path);
+  }
+
 
   // ---------------------------------------------------------------------------
   // Build

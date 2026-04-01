@@ -694,11 +694,13 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
             ),
             const SizedBox(height: 8),
             ElevatedButton.icon(
-              onPressed: (_isInventoryRunning || _isRunning)
+              onPressed: (_isInventoryRunning || _isRunning || folderPath == null)
                   ? null
                   : () => Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => const RationalizeScreen(),
+                          builder: (_) => RationalizeScreen(
+                            initialFolder: folderPath,
+                          ),
                         ),
                       ),
               style: ElevatedButton.styleFrom(

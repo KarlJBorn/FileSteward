@@ -10,7 +10,7 @@ void main() {
 
     // Splash screen should be visible first.
     expect(find.text('FileSteward'), findsOneWidget);
-    expect(find.text('v0.3.1'), findsOneWidget);
+    expect(find.text('v0.3.2'), findsOneWidget);
 
     // Advance past the splash timer and settle the navigation animation.
     await tester.pump(const Duration(milliseconds: 1500));
