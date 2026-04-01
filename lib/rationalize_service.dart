@@ -5,16 +5,19 @@ import 'dart:io';
 import 'rationalize_events.dart';
 import 'rationalize_models.dart';
 
-/// Manages the two-phase communication with the Rust rationalize engine:
+/// Manages the three-phase communication with the Rust rationalize engine:
 ///
 ///   Phase 1 — Scan: spawn process, stream progress events + findings payload.
-///   Phase 2 — Execute: write execution plan to stdin, read execution result.
+///   Phase 2 — Build: write BuildCommand to stdin, stream build_progress events,
+///              receive build_complete.
+///   Phase 3 — Swap: write SwapCommand to stdin, receive swap_complete.
 ///
 /// Usage:
 /// ```dart
 /// final session = await RationalizeService().startSession(folderPath);
 /// await for (final event in session.events) { ... }
-/// final result = await session.execute(plan);
+/// final buildResult = await session.build(buildCommand, onProgress: ...);
+/// final swapResult = await session.swap(swapCommand);
 /// await session.dispose();
 /// ```
 class RationalizeService {
@@ -159,18 +162,105 @@ class RationalizeSession {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 2 — Execute
+  // Phase 2 — Build
   // ---------------------------------------------------------------------------
 
-  /// Send [plan] to Rust via stdin and wait for the execution result.
+  /// Send [cmd] to Rust and stream build progress until build_complete arrives.
   ///
-  /// Must only be called after the [events] stream has completed (i.e. after
-  /// [RationalizeScanComplete] has been yielded).
+  /// [onProgress] is called for each build_progress event (may be null).
+  /// Returns [BuildResult] on completion (check [BuildResult.succeeded]).
+  ///
+  /// Must only be called after the [events] stream has completed.
+  Future<BuildResult?> build(
+    BuildCommand cmd, {
+    void Function(int done, int total, String current)? onProgress,
+  }) async {
+    if (_process == null || _stdout == null) return null;
+
+    final cmdJson = jsonEncode(cmd.toJson());
+    try {
+      _process.stdin.writeln(cmdJson);
+      await _process.stdin.flush();
+      // Do NOT close stdin — swap command follows.
+    } catch (_) {
+      return null;
+    }
+
+    final stdout = _stdout;
+    while (await stdout.moveNext()) {
+      final line = stdout.current.trim();
+      if (line.isEmpty) continue;
+
+      final Map<String, dynamic> json;
+      try {
+        json = jsonDecode(line) as Map<String, dynamic>;
+      } on FormatException {
+        continue;
+      }
+
+      switch (json['type'] as String? ?? '') {
+        case 'build_progress':
+          onProgress?.call(
+            json['folders_done'] as int? ?? 0,
+            json['folders_total'] as int? ?? 0,
+            json['current'] as String? ?? '',
+          );
+        case 'build_complete':
+          return BuildResult.fromJson(json);
+      }
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 — Swap
+  // ---------------------------------------------------------------------------
+
+  /// Send [cmd] to Rust and wait for swap_complete.
+  ///
+  /// Must only be called after [build] has returned successfully.
+  /// Closes stdin after writing so the Rust process can exit.
+  Future<SwapResult?> swap(SwapCommand cmd) async {
+    if (_process == null || _stdout == null) return null;
+
+    final cmdJson = jsonEncode(cmd.toJson());
+    try {
+      _process.stdin.writeln(cmdJson);
+      await _process.stdin.flush();
+      await _process.stdin.close(); // no more commands after swap
+    } catch (_) {
+      return null;
+    }
+
+    final stdout = _stdout;
+    while (await stdout.moveNext()) {
+      final line = stdout.current.trim();
+      if (line.isEmpty) continue;
+
+      final Map<String, dynamic> json;
+      try {
+        json = jsonDecode(line) as Map<String, dynamic>;
+      } on FormatException {
+        continue;
+      }
+
+      if (json['type'] == 'swap_complete') {
+        return SwapResult.fromJson(json);
+      }
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 (legacy) — Execute (in-place; kept during transition)
+  // ---------------------------------------------------------------------------
+
+  /// Legacy in-place execution. Use [build] + [swap] for new code.
   Future<ExecutionResult?> execute(ExecutionPlan plan) async {
     if (_process == null || _stdout == null) return null;
 
-    // Write execution plan as a single JSON line to stdin, then close stdin
-    // to signal end of input to the Rust process.
     final planJson = jsonEncode(plan.toJson());
     try {
       _process.stdin.writeln(planJson);
@@ -180,7 +270,6 @@ class RationalizeSession {
       return null;
     }
 
-    // Read lines from stdout until we get the execution_result event.
     final stdout = _stdout;
     while (await stdout.moveNext()) {
       final line = stdout.current.trim();

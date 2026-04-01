@@ -159,12 +159,34 @@ class ScanErrorEntry {
   }
 }
 
+/// One entry in the full directory listing returned with the findings payload.
+class DirectoryEntry {
+  final String relativePath;
+  final bool isFile;
+  final int? sizeBytes;
+
+  const DirectoryEntry({
+    required this.relativePath,
+    required this.isFile,
+    this.sizeBytes,
+  });
+
+  factory DirectoryEntry.fromJson(Map<String, dynamic> json) {
+    return DirectoryEntry(
+      relativePath: json['relative_path'] as String? ?? '',
+      isFile: (json['entry_type'] as String? ?? '') == 'file',
+      sizeBytes: json['size_bytes'] as int?,
+    );
+  }
+}
+
 class FindingsPayload {
   final String selectedFolder;
   final String scannedAt;
   final int totalFolders;
   final List<RationalizeFinding> findings;
   final List<ScanErrorEntry> errors;
+  final List<DirectoryEntry> entries;
 
   const FindingsPayload({
     required this.selectedFolder,
@@ -172,11 +194,13 @@ class FindingsPayload {
     required this.totalFolders,
     required this.findings,
     required this.errors,
+    required this.entries,
   });
 
   factory FindingsPayload.fromJson(Map<String, dynamic> json) {
     final rawFindings = json['findings'] as List<dynamic>? ?? [];
     final rawErrors = json['errors'] as List<dynamic>? ?? [];
+    final rawEntries = json['entries'] as List<dynamic>? ?? [];
     return FindingsPayload(
       selectedFolder: json['selected_folder'] as String? ?? '',
       scannedAt: json['scanned_at'] as String? ?? '',
@@ -187,6 +211,9 @@ class FindingsPayload {
           .toList(),
       errors: rawErrors
           .map((e) => ScanErrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      entries: rawEntries
+          .map((e) => DirectoryEntry.fromJson(e as Map<String, dynamic>))
           .toList(),
     );
   }
@@ -348,6 +375,117 @@ class ExecutionResult {
           .map((e) =>
               ExecutionEntryResult.fromJson(e as Map<String, dynamic>))
           .toList(),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BuildCommand (Flutter → Rust, message type: "build")
+// ---------------------------------------------------------------------------
+
+class BuildCommand {
+  final String sourcePath;
+  final String targetPath;
+  final String sessionId;
+  final List<ExecutionActionItem> actions;
+
+  const BuildCommand({
+    required this.sourcePath,
+    required this.targetPath,
+    required this.sessionId,
+    required this.actions,
+  });
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'type': 'build',
+      'source_path': sourcePath,
+      'target_path': targetPath,
+      'session_id': sessionId,
+      'actions': actions.map((a) => a.toJson()).toList(),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BuildResult (Rust → Flutter, message type: "build_complete")
+// ---------------------------------------------------------------------------
+
+class BuildResult {
+  final String sessionId;
+  final String targetPath;
+  final int foldersCopied;
+  final int filesCopied;
+  final int foldersOmitted;
+  final String? error;
+
+  const BuildResult({
+    required this.sessionId,
+    required this.targetPath,
+    required this.foldersCopied,
+    required this.filesCopied,
+    required this.foldersOmitted,
+    this.error,
+  });
+
+  bool get succeeded => error == null;
+
+  factory BuildResult.fromJson(Map<String, dynamic> json) {
+    return BuildResult(
+      sessionId: json['session_id'] as String? ?? '',
+      targetPath: json['target_path'] as String? ?? '',
+      foldersCopied: json['folders_copied'] as int? ?? 0,
+      filesCopied: json['files_copied'] as int? ?? 0,
+      foldersOmitted: json['folders_omitted'] as int? ?? 0,
+      error: json['error'] as String?,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SwapCommand (Flutter → Rust, message type: "swap")
+// ---------------------------------------------------------------------------
+
+class SwapCommand {
+  final String sourcePath;
+  final String targetPath;
+
+  const SwapCommand({
+    required this.sourcePath,
+    required this.targetPath,
+  });
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'type': 'swap',
+      'source_path': sourcePath,
+      'target_path': targetPath,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SwapResult (Rust → Flutter, message type: "swap_complete")
+// ---------------------------------------------------------------------------
+
+class SwapResult {
+  final String oldPath;
+  final String newPath;
+  final String? error;
+
+  const SwapResult({
+    required this.oldPath,
+    required this.newPath,
+    this.error,
+  });
+
+  bool get succeeded => error == null;
+
+  factory SwapResult.fromJson(Map<String, dynamic> json) {
+    return SwapResult(
+      oldPath: json['old_path'] as String? ?? '',
+      newPath: json['new_path'] as String? ?? '',
+      error: json['error'] as String?,
     );
   }
 }
