@@ -431,11 +431,16 @@ class BuildCommand {
   final String sessionId;
   final List<ExecutionActionItem> actions;
 
+  /// Relative paths of duplicate copies to omit from the target.
+  /// Non-kept copies from all resolved duplicate groups.
+  final List<String> duplicateRemovals;
+
   const BuildCommand({
     required this.sourcePath,
     required this.targetPath,
     required this.sessionId,
     required this.actions,
+    this.duplicateRemovals = const [],
   });
 
   Map<String, dynamic> toJson() {
@@ -445,6 +450,7 @@ class BuildCommand {
       'target_path': targetPath,
       'session_id': sessionId,
       'actions': actions.map((a) => a.toJson()).toList(),
+      'duplicate_removals': duplicateRemovals,
     };
   }
 }

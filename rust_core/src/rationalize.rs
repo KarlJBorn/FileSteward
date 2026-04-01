@@ -439,6 +439,10 @@ struct BuildCommand {
     target_path: String,
     session_id: String,
     actions: Vec<ExecutionAction>,
+    /// Relative paths of duplicate copies to omit from the target.
+    /// These are the non-kept copies from resolved duplicate groups.
+    #[serde(default)]
+    duplicate_removals: Vec<String>,
 }
 
 /// Copy-then-swap: swap phase command.
@@ -1631,6 +1635,11 @@ fn build_target(cmd: &BuildCommand) -> BuildCompleteEvent {
     let mut remap: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut skip: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
+    // Duplicate removals: relative paths → absolute source paths added to skip.
+    for rel in &cmd.duplicate_removals {
+        skip.insert(source.join(rel));
+    }
+
     for action in &cmd.actions {
         let src = PathBuf::from(&action.absolute_path);
         match action.action.as_str() {
@@ -2116,6 +2125,7 @@ mod tests {
             target_path: target.to_string_lossy().into_owned(),
             session_id: "test".to_string(),
             actions: vec![],
+            duplicate_removals: vec![],
         };
         let result = build_target(&cmd);
         assert!(result.error.is_none(), "{:?}", result.error);
@@ -2147,6 +2157,7 @@ mod tests {
                     source.join("Photos").to_string_lossy().into_owned(),
                 ),
             }],
+            duplicate_removals: vec![],
         };
         let result = build_target(&cmd);
         assert!(result.error.is_none(), "{:?}", result.error);
@@ -2175,6 +2186,7 @@ mod tests {
                 absolute_path: remove.to_string_lossy().into_owned(),
                 absolute_destination: None,
             }],
+            duplicate_removals: vec![],
         };
         let result = build_target(&cmd);
         assert!(result.error.is_none(), "{:?}", result.error);
@@ -2200,11 +2212,51 @@ mod tests {
             target_path: target.to_string_lossy().into_owned(),
             session_id: "test".to_string(),
             actions: vec![],
+            duplicate_removals: vec![],
         };
         let result = build_target(&cmd);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.files_copied, 1);
         assert!(target.join("photos").join("img.jpg").exists());
+    }
+
+    #[test]
+    fn test_build_target_omits_duplicate_removals() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = make_dir(root, "source");
+        let target = root.join("target");
+
+        // Two copies of the same file in different folders.
+        let photos = make_dir(&source, "Photos");
+        let holidays = make_dir(&source, "Holidays");
+        make_file(&photos, "IMG_0055.txt", b"vacation photo content");
+        make_file(&holidays, "IMG_0055.txt", b"vacation photo content");
+
+        // User chose to keep Photos/IMG_0055.txt; Holidays/IMG_0055.txt is a removal.
+        let cmd = BuildCommand {
+            command_type: "build".to_string(),
+            source_path: source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            session_id: "test".to_string(),
+            actions: vec![],
+            duplicate_removals: vec!["Holidays/IMG_0055.txt".to_string()],
+        };
+        let result = build_target(&cmd);
+        assert!(result.error.is_none(), "{:?}", result.error);
+
+        // Kept copy present in target.
+        assert!(
+            target.join("Photos").join("IMG_0055.txt").exists(),
+            "kept copy should be in target"
+        );
+        // Removed copy absent from target.
+        assert!(
+            !target.join("Holidays").join("IMG_0055.txt").exists(),
+            "duplicate removal should be absent from target"
+        );
+        // Source untouched.
+        assert!(source.join("Holidays").join("IMG_0055.txt").exists());
     }
 
     #[test]
@@ -2220,6 +2272,7 @@ mod tests {
             target_path: target.to_string_lossy().into_owned(),
             session_id: "test".to_string(),
             actions: vec![],
+            duplicate_removals: vec![],
         };
         let result = build_target(&cmd);
         assert!(result.error.is_some());
