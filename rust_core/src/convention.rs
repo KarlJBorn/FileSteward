@@ -336,7 +336,12 @@ pub fn suggest_rename(name: &str, target: NamingConvention) -> Option<String> {
             merge_date_parts(parts, s)
         }
         None => {
-            // Single word or camelCase
+            // Single word or camelCase — but ALL_CAPS names (no separator,
+            // no lowercase) are identifiers/acronyms and must never be
+            // split letter-by-letter. Return None so no rename is proposed.
+            if name.chars().all(|c| c.is_ascii_uppercase()) {
+                return None;
+            }
             let words = split_camel_case(name);
             words
                 .into_iter()
@@ -642,6 +647,24 @@ mod tests {
     fn test_rename_returns_none_for_ambiguous() {
         // "OLD_files" has an ambiguous token — no rename suggested
         assert_eq!(suggest_rename("OLD_files", NamingConvention::TitleCase), None);
+    }
+
+    #[test]
+    fn test_rename_returns_none_for_all_caps_identifier() {
+        // LINKSUPP — all-caps, no separator; must not be split letter-by-letter
+        assert_eq!(suggest_rename("LINKSUPP", NamingConvention::TitleCase), None);
+    }
+
+    #[test]
+    fn test_rename_returns_none_for_all_caps_short() {
+        // Short all-caps like "HP" must also be left alone
+        assert_eq!(suggest_rename("HP", NamingConvention::TitleCase), None);
+    }
+
+    #[test]
+    fn test_rename_returns_none_for_all_caps_medium() {
+        // Five-char all-caps — was previously only guarded up to 4 chars
+        assert_eq!(suggest_rename("KODAK", NamingConvention::TitleCase), None);
     }
 
     #[test]
