@@ -1,18 +1,21 @@
-/// Directory rationalization engine — Iteration 3.
+/// Directory rationalization engine — Iteration 3+.
 ///
 /// Scans a folder tree, generates structural findings (empty folders,
-/// naming inconsistencies, misplaced files, excessive nesting), then reads
-/// an execution plan from stdin and applies the approved actions.
+/// naming inconsistencies, misplaced files, excessive nesting), detects
+/// duplicate files by SHA-256 hash, then reads an execution plan from stdin
+/// and applies the approved actions.
 ///
 /// All output is newline-delimited JSON to stdout. All filesystem operations
 /// (rename, move, quarantine) are performed here — Flutter never touches
 /// the filesystem directly.
 
 use crate::convention::{classify_convention, dominant_convention, suggest_rename, NamingConvention};
+use hex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -77,6 +80,12 @@ struct FileInfo {
     relative_path: String,
     absolute_path: PathBuf,
     extension: String,
+    /// SHA-256 hex digest of file contents. None if hashing failed (e.g. permission error).
+    sha256: Option<String>,
+    /// File modification time as seconds since Unix epoch. None if unavailable.
+    /// Used by the duplicate ranker in #83.
+    #[allow(dead_code)]
+    modified_secs: Option<u64>,
 }
 
 struct FolderNode {
@@ -97,6 +106,48 @@ struct FolderNode {
 
 fn is_metadata_file(name: &str) -> bool {
     METADATA_FILES.contains(&name)
+}
+
+// ---------------------------------------------------------------------------
+// Hashing + duplicate detection
+// ---------------------------------------------------------------------------
+
+/// Compute SHA-256 hex digest for a file. Returns None on any I/O error.
+fn hash_file(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Group files by SHA-256 hash. Only groups with 2+ members are returned.
+/// Each group is a sorted Vec of relative paths. Groups are sorted by their
+/// first member so output is deterministic.
+fn build_duplicate_groups(files: &[&FileInfo]) -> Vec<Vec<String>> {
+    let mut by_hash: HashMap<&str, Vec<&str>> = HashMap::new();
+    for file in files {
+        if let Some(hash) = &file.sha256 {
+            by_hash.entry(hash).or_default().push(&file.relative_path);
+        }
+    }
+    let mut groups: Vec<Vec<String>> = by_hash
+        .into_values()
+        .filter(|paths| paths.len() >= 2)
+        .map(|paths| {
+            let mut sorted: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+            sorted.sort();
+            sorted
+        })
+        .collect();
+    groups.sort_by(|a, b| a[0].cmp(&b[0]));
+    groups
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +206,9 @@ struct FindingsPayload {
     errors: Vec<ScanError>,
     /// Full directory listing — all folders and files under the selected root.
     entries: Vec<DirectoryEntry>,
+    /// Groups of files with identical SHA-256 content. Each inner vec contains
+    /// 2+ relative paths. Empty when no duplicates are found.
+    duplicate_groups: Vec<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -396,11 +450,24 @@ fn scan_directory(
                 .strip_prefix(root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let modified_secs = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            // Skip hashing system metadata files (they're never counted or shown).
+            let sha256 = if is_metadata_file(&entry_name) {
+                None
+            } else {
+                hash_file(&path)
+            };
             direct_files.push(FileInfo {
                 name: entry_name,
                 relative_path: file_relative,
                 absolute_path: path,
                 extension: ext,
+                sha256,
+                modified_secs,
             });
         }
     }
@@ -1144,6 +1211,7 @@ pub fn run(folder_path: &str) {
                 message: "Path does not exist or is not a directory".to_string(),
             }],
             entries: vec![],
+            duplicate_groups: vec![],
         };
         emit_json(&payload);
         return;
@@ -1163,6 +1231,8 @@ pub fn run(folder_path: &str) {
 
     // R7 — build full directory entry list from scanned folders + their files.
     let mut entries: Vec<DirectoryEntry> = Vec::new();
+    // Collect all files across all folders for duplicate detection.
+    let mut all_files: Vec<&FileInfo> = Vec::new();
     for folder in &folders {
         if folder.relative_path.is_empty() {
             continue; // skip root itself — Flutter shows it as the header
@@ -1181,9 +1251,15 @@ pub fn run(folder_path: &str) {
                 entry_type: "file",
                 size_bytes: size,
             });
+            if !is_metadata_file(&file.name) {
+                all_files.push(file);
+            }
         }
     }
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    // Duplicate detection — group files with identical SHA-256 hashes.
+    let duplicate_groups = build_duplicate_groups(&all_files);
 
     // R7 — emit findings payload
     let payload = FindingsPayload {
@@ -1194,6 +1270,7 @@ pub fn run(folder_path: &str) {
         findings,
         errors,
         entries,
+        duplicate_groups,
     };
     emit_json(&payload);
 
