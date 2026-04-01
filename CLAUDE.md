@@ -36,39 +36,41 @@ Always build Rust before running Flutter (`make rust-build` first) since Flutter
 
 ## Product Vision
 
-FileSteward is a personal file lifecycle manager with three distinct modes:
+FileSteward will ship as **two separate apps** sharing a common Rust engine. See `docs/product-definition.md` for the full definition.
 
-- **Clean** — rationalize a canonical operating directory: fix folder structure, remove duplicate files, enforce organization
-- **Consolidate** — extract unique files from backup archives and integrate them into the canonical directory; sources are never modified
-- **Maintain** — ongoing dedup, archival, and rule enforcement on live working directories
+**FileSteward Maintain** *(current focus)*
+Rationalizes a single directory: fixes folder structure, removes duplicate files, enforces naming conventions. Builds a clean copy alongside the source; user confirms a swap when satisfied. Source is never modified until swap is explicitly confirmed.
 
-It is **not** a bulk-delete tool; it is an analysis and decision-support tool. Every action is proposed, simulated, and confirmed before execution. Destructive operations use quarantine (move to staging) rather than permanent deletion.
+**FileSteward Consolidate** *(future)*
+Takes multiple similarly-structured directories and produces one canonical output. The latest source is the base; non-duplicate content from others is folded in. No swap — the output directory is the result.
+
+**Shared Rust engine** — directory walking, SHA-256 hashing, duplicate detection, build (copy with transformations). Restructure as a library is tracked in #79.
+
+It is **not** a bulk-delete tool; it is an analysis and decision-support tool. Every action is proposed and confirmed before execution.
 
 **Design principles:**
-- Safety over cleverness — default to analyze, recommend, quarantine, confirm; never default to destructive action
-- Explainability over magic — every recommendation must show its basis (same hash, newer timestamp, user rule, etc.)
+- Safety over cleverness — default to analyze, recommend, confirm; never default to destructive action
+- Explainability over magic — every recommendation must show its basis (same hash, naming convention, etc.)
 - Engine first, UI second — the Rust core must be fully testable from CLI independent of any UI
-- **Rust owns all execution** — all filesystem operations (rename, move, quarantine, log) are performed by the Rust engine; Flutter is UI only and never touches the filesystem directly
-- Desktop first, mobile second — macOS/Windows for full-drive rationalization; iPad/iPhone for review and targeted scans
+- **Rust owns all execution** — all filesystem operations are performed by the Rust engine; Flutter is UI only
+- Desktop first — macOS primary, Windows 11 secondary; iPad/iPhone for review only
 
 **Target platforms:** macOS (primary), Windows 11, iPadOS, iPhoneOS. No Android target.
 
 ## Domain Model
 
-The core entities the app reasons about:
-
 | Entity | Description |
 |--------|-------------|
-| `Volume` | A physical or logical drive being rationalized |
-| `ScanSession` | One run of the scanner against a folder or volume |
+| `ScanSession` | One run of the scanner against a folder |
 | `Asset` | A file discovered during a scan |
-| `Fingerprint` | A content hash (SHA-256) identifying file content |
+| `Fingerprint` | A SHA-256 content hash identifying file content |
+| `Finding` | A structural problem or duplicate group found during scan |
 | `DuplicateGroup` | Set of assets with identical fingerprints |
-| `SimilarityGroup` | Set of assets that are likely duplicates (near-match) |
-| `ProposedAction` | Keep / archive / quarantine / delete recommendation |
+| `ProposedAction` | Keep / rename / move / remove recommendation |
 | `ApprovalDecision` | Human confirmation of a proposed action |
+| `BuildResult` | Outcome of building the rationalized copy |
+| `SwapResult` | Outcome of the source ↔ copy swap |
 | `ExecutionLog` | Record of what was actually done and when |
-| `Exception` | User-defined exclusion or override rule |
 
 ## Iteration Plan
 
@@ -86,96 +88,84 @@ The core entities the app reasons about:
 - Streaming progress from Rust to Flutter UI
 - Flutter model and UI updates to show duplicate groups
 
-### Iteration 3 — Directory Rationalization (next)
-**Goal:** Analyze and reorganize the folder structure of a canonical directory. Folder-level operations only — no file content analysis.
+### Iteration 3 — Directory Rationalization ✅ Complete (v0.3.5)
+- Rationalize screen: side-by-side Original / Target directory trees
+- Findings engine: empty folders, naming inconsistencies, excessive nesting
+- Copy-then-swap safe execution model (source never modified until swap confirmed)
+- Naming engine: reserved words blocked, all-caps identifiers never renamed, date preservation
+- Right-click context menu: accept/reject findings, mark any folder for removal, bulk dismiss subtree
+- Build progress + results screen with stats (folders copied, files copied, omitted)
+- Splash screen with version number
+- Draft PR convention + CONTRIBUTING.md
 
-- Scan and analyze folder structure for structural problems:
-  - Redundant or near-duplicate folder names
-  - Inconsistent naming conventions
-  - Overly deep nesting
-  - Misplaced files (e.g. `.jpg` in `Documents/`)
-  - Empty or near-empty folders
-- Review UI: surface findings, propose folder-level changes
-- Simulate proposed changes before touching the filesystem
-- Execute approved changes with undo/quarantine safety net
-- Execution log
+### Iteration 4 — Duplicate File Detection *(current)*
+**Goal:** Complete the Maintain workflow by adding content-based duplicate detection and file-level resolution within a single directory tree.
 
-### Iteration 4 — File Cleanup
-**Goal:** Within the rationalized directory structure, find and resolve duplicate files.
+**What "done" looks like:**
+> "I scanned My Photos. FileSteward found 47 duplicate files across 12 groups. I reviewed each group, kept the best copy, removed the rest. Built and swapped."
 
-- Review UI for duplicate groups: open a group, see all copies, mark which to keep
-- Quarantine workflow: move discarded copies to staging folder (never delete outright)
-- Simulation mode: preview what would be removed/freed before execution
-- Execute approved actions with full execution log
-- Export scan report (CSV or JSON)
+**Scope:**
+- Wire SHA-256 hashing into the rationalize scan (infrastructure exists in `main.rs`, needs porting to `rationalize.rs`)
+- Emit `duplicate_file` findings grouping files by hash
+- Show duplicate groups in the rationalize UI; right-click file actions (keep / remove this copy)
+- Build step already handles file skips via skip table — no engine changes needed there
+- Update `docs/product-definition.md` to reflect Maintain-first approach and two-app decision
 
-### Iteration 5 — Consolidate (Backup Integration)
-**Goal:** Read backup archives, extract files not already present in the canonical directory, and copy them in using the canonical structure as the schema. Sources are never modified.
+**Out of scope:** Consolidate, library restructure (#79), near-duplicate similarity detection, rules engine.
 
-- Define canonical directory as the organizational template
-- Scan backup sources against canonical (dedup across sources)
-- Map unique files to their target location in canonical structure
-- Copy (never move) selected files to target
-- Output destination options: offline archive, iCloud unsynced folder, or merge into canonical
+### Iteration 5 — Consolidate App (first version)
+**Goal:** FileSteward Consolidate v1. Multiple source directories → one canonical output.
 
-### Iteration 6 — Maintain
-**Goal:** Ongoing dedup, archival, and rule enforcement on live working directories.
+- Multi-folder selection (#38)
+- Engine: walk all sources, fingerprint files, identify unique content not in primary
+- User reviews: which unique files to fold in
+- Engine builds output directory (no swap)
+- Cleaning rules applied to secondary sources before folding (skip empty, reserved, system folders)
+- Rust core restructured as shared library (#79)
 
-- Monitor canonical directory for changes
-- Enforce user-defined rules (naming conventions, folder structure, file type placement)
-- Recurring dedup checks against the canonical index
-- Archive aging files based on access patterns or explicit rules
-- Execution log and undo support
-
-### Iteration 7 — iPad/iPhone Review Client
-- Narrower scope: open saved scan, review groups, approve/reject recommendations
+### Iteration 6 — iPad/iPhone Review Client
+- Open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
-- **Quarantine browser** — browse items moved to quarantine in prior sessions, restore to target
 
-### Iteration 8 — Advanced UX + Performance
+### Iteration 7 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
-- Recommendation engine
 - Performance tuning for large external drives (100k+ files)
+- Rules engine: user-defined naming and placement rules
 
 ## Architecture
 
 **Stack:** Flutter/Dart (UI), Rust (file engine), JSON over stdout (integration boundary).
 
-**Data flow:**
-1. User picks a folder in Flutter UI
-2. `ManifestService` (`lib/manifest_service.dart`) spawns the Rust binary as a subprocess
-3. Rust walks the directory, computes hashes (Iteration 1+), outputs JSON to stdout
-4. Flutter parses JSON into models (`lib/manifest_models.dart`)
-5. `ManifestFilter` (`lib/manifest_filter.dart`) applies type/search filters
-6. Results render in `main.dart`
+**Rationalize data flow:**
+1. User picks a folder; `RationalizeScreen` passes it to `RationalizeService`
+2. `RationalizeService` spawns the Rust binary as a subprocess, sends a `scan` command via stdin
+3. Rust walks the directory, generates findings, streams progress events and a `findings` payload to stdout
+4. Flutter parses events into `FindingsPayload` (`lib/rationalize_models.dart`)
+5. User reviews side-by-side Original/Target trees, accepts/rejects/marks findings
+6. On apply: `RationalizeService` sends a `build` command; Rust builds rationalized copy, streams progress
+7. On swap confirm: `RationalizeService` sends a `swap` command; Rust renames source → `.OLD`, copy → source
 
 **Rust binary resolution order:**
 1. `FILESTEWARD_RUST_BINARY` env var
 2. `rust_core/target/debug/rust_core` (checked at 1–3 directory levels up)
 
-**Current Rust output shape** (`ManifestResult`):
-```json
-{
-  "selected_folder": "/path/to/folder",
-  "exists": true,
-  "is_directory": true,
-  "total_directories": 4,
-  "total_files": 12,
-  "entries": [
-    { "relative_path": "foo/bar.jpg", "entry_type": "file", "size_bytes": 204800 }
-  ]
-}
-```
-When hashing is added, `ManifestEntry` gains `sha256: Option<String>` and the output gains `duplicate_groups: Vec<Vec<String>>`.
-
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `lib/main.dart` | App entry, UI state, folder selection, manifest display |
-| `lib/manifest_service.dart` | Spawns Rust binary, parses stdout JSON |
-| `lib/manifest_models.dart` | `ManifestEntry`, `ManifestResult` with JSON deserialization |
-| `lib/manifest_filter.dart` | Filter by type (all/dirs/files) and search query |
-| `rust_core/src/main.rs` | Recursive directory walker, JSON serializer |
-| `test_corpus/` | Fixture folders used in tests |
+| `lib/main.dart` | App entry, home screen, folder selection, manifest display |
+| `lib/rationalize_screen.dart` | Full rationalize UI — scan, review, build, swap |
+| `lib/rationalize_service.dart` | Spawns Rust binary, manages scan/build/swap session |
+| `lib/rationalize_models.dart` | `FindingsPayload`, `RationalizeFinding`, `BuildResult`, `SwapResult` |
+| `lib/rationalize_events.dart` | Typed event stream from Rust (progress, findings, errors) |
+| `lib/manifest_service.dart` | Legacy manifest scan — spawns Rust binary, parses stdout JSON |
+| `lib/manifest_models.dart` | `ManifestEntry`, `ManifestResult` |
+| `lib/app_version.dart` | `kAppVersion` constant — keep in sync with `pubspec.yaml` |
+| `lib/splash_screen.dart` | Launch splash showing version number |
+| `rust_core/src/rationalize.rs` | Rationalize engine — scan, findings, build, swap |
+| `rust_core/src/convention.rs` | Naming convention classification and rename suggestions |
+| `rust_core/src/main.rs` | Manifest scan path — walker, hashing, duplicate groups |
+| `test_corpus/` | Fixture folders used in Rust and Flutter tests |
+| `docs/product-definition.md` | Two-app product definition (Maintain + Consolidate) |
+| `CONTRIBUTING.md` | Branch model, PR workflow, draft PR convention |
