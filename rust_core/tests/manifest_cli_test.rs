@@ -135,7 +135,7 @@ fn rationalize_duplicate_groups_contain_correct_paths() {
     // IMG_0055 pair (2-way duplicate)
     assert_eq!(
         group_sets[0],
-        vec!["Family/Photos/IMG_0055.jpg", "Holidays/IMG_0055.jpg"],
+        vec!["Family/Photos/IMG_0055.txt", "Holidays/IMG_0055.txt"],
         "unexpected paths in IMG_0055 duplicate group"
     );
 
@@ -143,9 +143,9 @@ fn rationalize_duplicate_groups_contain_correct_paths() {
     assert_eq!(
         group_sets[1],
         vec![
-            "Family/Photos/birthday.mp4",
-            "Temp/birthday_backup.mp4",
-            "Videos/birthday.mp4",
+            "Family/Photos/birthday.txt",
+            "Temp/birthday_backup.txt",
+            "Videos/birthday.txt",
         ],
         "unexpected paths in birthday duplicate group"
     );
@@ -165,7 +165,7 @@ fn rationalize_unique_file_not_in_duplicate_groups() {
         .collect();
 
     assert!(
-        !all_paths.contains(&"Family/Photos/notes.txt"),
+        !all_paths.iter().any(|p| p.ends_with("notes.txt")),
         "unique file should not appear in any duplicate group"
     );
 }
