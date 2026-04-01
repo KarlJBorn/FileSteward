@@ -95,75 +95,62 @@ fn manifest_cli_outputs_expected_fixture_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// Duplicate detection tests (rationalize mode, #82)
+// Duplicate detection + ranker tests (rationalize mode, #82/#83)
 // ---------------------------------------------------------------------------
+
+fn duplicate_groups(fixture: &str) -> Vec<serde_json::Value> {
+    let payload = run_rationalize(fixture);
+    payload["duplicate_groups"]
+        .as_array()
+        .expect("duplicate_groups should be an array")
+        .clone()
+}
+
+fn paths_of(group: &serde_json::Value) -> Vec<String> {
+    group["paths"]
+        .as_array()
+        .expect("group should have a paths array")
+        .iter()
+        .map(|p| p.as_str().expect("path should be a string").to_string())
+        .collect()
+}
+
+fn suggested_keep(group: &serde_json::Value) -> &str {
+    group["suggested_keep"]
+        .as_str()
+        .expect("group should have suggested_keep")
+}
 
 #[test]
 fn rationalize_detects_duplicate_pair() {
-    let payload = run_rationalize("rationalize_duplicates");
-    let groups = payload["duplicate_groups"]
-        .as_array()
-        .expect("duplicate_groups should be an array");
-
+    let groups = duplicate_groups("rationalize_duplicates");
     // Should find exactly 2 groups: the IMG_0055 pair and the birthday three-way.
     assert_eq!(groups.len(), 2, "expected 2 duplicate groups, got: {:?}", groups);
 }
 
 #[test]
 fn rationalize_duplicate_groups_contain_correct_paths() {
-    let payload = run_rationalize("rationalize_duplicates");
-    let groups = payload["duplicate_groups"]
-        .as_array()
-        .expect("duplicate_groups should be an array");
+    let groups = duplicate_groups("rationalize_duplicates");
 
-    // Collect all groups as sorted Vec<Vec<String>> for stable comparison.
-    let mut group_sets: Vec<Vec<String>> = groups
-        .iter()
-        .map(|g| {
-            let mut paths: Vec<String> = g
-                .as_array()
-                .expect("each group should be an array")
-                .iter()
-                .map(|p| p.as_str().expect("path should be a string").to_string())
-                .collect();
-            paths.sort();
-            paths
-        })
-        .collect();
+    let mut group_sets: Vec<Vec<String>> = groups.iter().map(|g| paths_of(g)).collect();
     group_sets.sort_by(|a, b| a[0].cmp(&b[0]));
 
-    // IMG_0055 pair (2-way duplicate)
+    // IMG_0055 pair (2-way)
     assert_eq!(
         group_sets[0],
         vec!["Family/Photos/IMG_0055.txt", "Holidays/IMG_0055.txt"],
-        "unexpected paths in IMG_0055 duplicate group"
     );
-
-    // birthday three-way duplicate
+    // birthday three-way
     assert_eq!(
         group_sets[1],
-        vec![
-            "Family/Photos/birthday.txt",
-            "Temp/birthday_backup.txt",
-            "Videos/birthday.txt",
-        ],
-        "unexpected paths in birthday duplicate group"
+        vec!["Family/Photos/birthday.txt", "Temp/birthday_backup.txt", "Videos/birthday.txt"],
     );
 }
 
 #[test]
 fn rationalize_unique_file_not_in_duplicate_groups() {
-    let payload = run_rationalize("rationalize_duplicates");
-    let groups = payload["duplicate_groups"]
-        .as_array()
-        .expect("duplicate_groups should be an array");
-
-    let all_paths: Vec<&str> = groups
-        .iter()
-        .flat_map(|g| g.as_array().unwrap())
-        .map(|p| p.as_str().unwrap())
-        .collect();
-
+    let groups = duplicate_groups("rationalize_duplicates");
+    let all_paths: Vec<String> = groups.iter().flat_map(|g| paths_of(g)).collect();
     assert!(
         !all_paths.iter().any(|p| p.ends_with("notes.txt")),
         "unique file should not appear in any duplicate group"
@@ -172,14 +159,71 @@ fn rationalize_unique_file_not_in_duplicate_groups() {
 
 #[test]
 fn rationalize_no_duplicates_returns_empty_groups() {
-    // rationalize_clean has three files with distinct content — no duplicates.
-    let payload = run_rationalize("rationalize_clean");
-    let groups = payload["duplicate_groups"]
-        .as_array()
-        .expect("duplicate_groups should be an array");
-    assert!(
-        groups.is_empty(),
-        "expected no duplicate groups in clean fixture, got: {:?}",
-        groups
+    let groups = duplicate_groups("rationalize_clean");
+    assert!(groups.is_empty(), "expected no duplicate groups, got: {:?}", groups);
+}
+
+// — Ranker tests (#83) —
+
+#[test]
+fn ranker_penalizes_junk_folder_temp() {
+    // birthday_backup.txt lives in Temp/ — should NOT be the suggested keep.
+    let groups = duplicate_groups("rationalize_duplicates");
+    let birthday_group = groups
+        .iter()
+        .find(|g| paths_of(g).contains(&"Temp/birthday_backup.txt".to_string()))
+        .expect("birthday group should exist");
+    assert_ne!(
+        suggested_keep(birthday_group),
+        "Temp/birthday_backup.txt",
+        "file in Temp/ should not be the suggested keep"
     );
+}
+
+#[test]
+fn ranker_penalizes_copy_artifact_in_filename() {
+    // birthday_backup.txt has "_backup" artifact — should be penalized.
+    let groups = duplicate_groups("rationalize_duplicates");
+    let birthday_group = groups
+        .iter()
+        .find(|g| paths_of(g).contains(&"Temp/birthday_backup.txt".to_string()))
+        .expect("birthday group should exist");
+    assert_ne!(
+        suggested_keep(birthday_group),
+        "Temp/birthday_backup.txt",
+        "copy-artifact file should not be the suggested keep"
+    );
+}
+
+#[test]
+fn ranker_suggested_keep_is_not_ambiguous_for_birthday_group() {
+    // The birthday group has a clear winner (Videos/birthday.txt: depth 1, no junk, no artifact).
+    let groups = duplicate_groups("rationalize_duplicates");
+    let birthday_group = groups
+        .iter()
+        .find(|g| paths_of(g).contains(&"Videos/birthday.txt".to_string()))
+        .expect("birthday group should exist");
+    assert_eq!(
+        birthday_group["ambiguous"], false,
+        "birthday group should not be ambiguous"
+    );
+}
+
+#[test]
+fn ranker_each_group_has_required_fields() {
+    let groups = duplicate_groups("rationalize_duplicates");
+    for group in &groups {
+        assert!(group["paths"].is_array(), "group missing paths");
+        assert!(group["suggested_keep"].is_string(), "group missing suggested_keep");
+        assert!(group["reasons"].is_array(), "group missing reasons");
+        assert!(group["ambiguous"].is_boolean(), "group missing ambiguous");
+        // suggested_keep must be one of the paths
+        let keep = suggested_keep(group);
+        assert!(
+            paths_of(group).contains(&keep.to_string()),
+            "suggested_keep '{}' is not in paths {:?}",
+            keep,
+            paths_of(group)
+        );
+    }
 }

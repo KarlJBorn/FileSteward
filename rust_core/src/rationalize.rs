@@ -127,27 +127,194 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
-/// Group files by SHA-256 hash. Only groups with 2+ members are returned.
-/// Each group is a sorted Vec of relative paths. Groups are sorted by their
-/// first member so output is deterministic.
-fn build_duplicate_groups(files: &[&FileInfo]) -> Vec<Vec<String>> {
-    let mut by_hash: HashMap<&str, Vec<&str>> = HashMap::new();
-    for file in files {
-        if let Some(hash) = &file.sha256 {
-            by_hash.entry(hash).or_default().push(&file.relative_path);
+/// Folder names that signal a low-quality destination — files here are likely
+/// unsorted or temporary. Case-insensitive match against each path component.
+const JUNK_FOLDER_NAMES: &[&str] = &[
+    "temp", "tmp", "downloads", "desktop", "misc", "miscellaneous",
+    "untitled", "new folder", "backup", "backups", "bak",
+    "unsorted", "inbox", "dump", "scratch",
+];
+
+/// Filename substrings (lowercase) that indicate a copy artifact —
+/// the file is likely a duplicate rather than the canonical original.
+const COPY_ARTIFACT_PATTERNS: &[&str] = &[
+    " copy", "(copy)", " - copy", "_copy", "_backup", "_bak", "_old",
+    " (2)", " (3)", " (4)", " (5)",
+    "_2.", "_3.", "_4.", "_5.",
+];
+
+/// Penalty score for a single copy (lower = better candidate to keep).
+///
+/// Returns `(score, reasons)` where `reasons` explains the penalties found.
+/// Reasons are phrased negatively (why this copy is worse) so the caller
+/// can build a positive explanation for the winner.
+fn penalty_score(rel_path: &str) -> (u32, Vec<String>) {
+    let mut score = 0u32;
+    let mut reasons: Vec<String> = Vec::new();
+
+    // Split into path components; last component is the filename.
+    let components: Vec<&str> = rel_path.split('/').collect();
+    let folder_components = if components.len() > 1 {
+        &components[..components.len() - 1]
+    } else {
+        &[][..]
+    };
+    let file_name = components.last().copied().unwrap_or("");
+    let file_name_lower = file_name.to_lowercase();
+
+    // Remove extension for artifact pattern matching (avoid false hits on ".bak").
+    let stem_lower = if let Some(dot) = file_name_lower.rfind('.') {
+        &file_name_lower[..dot]
+    } else {
+        &file_name_lower
+    };
+
+    // — Junk folder penalty (10 pts per junk folder in path) —
+    for folder in folder_components {
+        let lower = folder.to_lowercase();
+        if JUNK_FOLDER_NAMES.contains(&lower.as_str()) {
+            score += 10;
+            reasons.push(format!("{}/ is a low-quality destination", folder));
         }
     }
-    let mut groups: Vec<Vec<String>> = by_hash
+
+    // — Folder naming quality (3 pts per folder with Unknown/messy convention) —
+    // Uses classify_convention: Unknown means the name doesn't follow any
+    // recognizable pattern (not title case, snake, camel, or kebab).
+    for folder in folder_components {
+        if matches!(
+            classify_convention(folder),
+            NamingConvention::Unknown
+        ) {
+            score += 3;
+            reasons.push(format!("{}/ has a non-standard folder name", folder));
+        }
+    }
+
+    // — Copy artifact penalty (5 pts if filename looks like a copy) —
+    for pattern in COPY_ARTIFACT_PATTERNS {
+        if stem_lower.contains(pattern) {
+            score += 5;
+            reasons.push(format!(
+                "\"{}\" appears to be a copy (contains \"{}\")",
+                file_name, pattern
+            ));
+            break; // one artifact penalty per file is enough
+        }
+    }
+
+    // — Path depth penalty (1 pt per folder level beyond 1) —
+    let depth = folder_components.len();
+    if depth > 1 {
+        score += (depth - 1) as u32;
+        // Depth reasons are only surfaced at group level when it's the deciding factor.
+    }
+
+    (score, reasons)
+}
+
+/// Group files by SHA-256 hash (internal — returns full FileInfo per group).
+fn group_files_by_hash<'a>(files: &[&'a FileInfo]) -> Vec<Vec<&'a FileInfo>> {
+    let mut by_hash: HashMap<&str, Vec<&FileInfo>> = HashMap::new();
+    for file in files {
+        if let Some(hash) = &file.sha256 {
+            by_hash.entry(hash).or_default().push(file);
+        }
+    }
+    let mut groups: Vec<Vec<&FileInfo>> = by_hash
         .into_values()
-        .filter(|paths| paths.len() >= 2)
-        .map(|paths| {
-            let mut sorted: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
-            sorted.sort();
-            sorted
+        .filter(|g| g.len() >= 2)
+        .collect();
+    // Stable sort so output order is deterministic.
+    groups.sort_by(|a, b| a[0].relative_path.cmp(&b[0].relative_path));
+    groups
+}
+
+/// Rank a single duplicate group and return a `DuplicateGroup` with the
+/// suggested keeper and the reasoning.
+fn rank_group(group: &[&FileInfo]) -> DuplicateGroup {
+    // Score every copy.
+    let scored: Vec<(&FileInfo, u32, Vec<String>)> = group
+        .iter()
+        .map(|f| {
+            let (s, r) = penalty_score(&f.relative_path);
+            (*f, s, r)
         })
         .collect();
-    groups.sort_by(|a, b| a[0].cmp(&b[0]));
-    groups
+
+    let min_score = scored.iter().map(|(_, s, _)| *s).min().unwrap_or(0);
+    let candidates: Vec<&(&FileInfo, u32, Vec<String>)> = scored
+        .iter()
+        .filter(|(_, s, _)| *s == min_score)
+        .collect();
+
+    // If multiple candidates have the same minimum penalty, use timestamp as
+    // a tiebreaker (newer = keep).
+    let best_mtime = candidates
+        .iter()
+        .filter_map(|(f, _, _)| f.modified_secs)
+        .max();
+
+    let final_candidates: Vec<&&(&FileInfo, u32, Vec<String>)> = match best_mtime {
+        Some(mtime) => candidates
+            .iter()
+            .filter(|(f, _, _)| f.modified_secs == Some(mtime))
+            .collect(),
+        None => candidates.iter().collect(),
+    };
+
+    let ambiguous = final_candidates.len() > 1;
+
+    // Pick the first final candidate (alphabetically stable after sorting).
+    let (winner, _, winner_reasons) = final_candidates[0];
+
+    // Build human-readable reasons explaining the choice.
+    let mut reasons: Vec<String> = Vec::new();
+
+    // Describe why losers lost (gives context for why winner was picked).
+    let loser_reasons: Vec<String> = scored
+        .iter()
+        .filter(|(f, _, _)| f.relative_path != winner.relative_path)
+        .flat_map(|(_, _, r)| r.clone())
+        .collect();
+
+    if !loser_reasons.is_empty() {
+        reasons.extend(loser_reasons);
+    } else if best_mtime.is_some() && !ambiguous {
+        reasons.push("Newer file (timestamp tiebreaker)".to_string());
+    } else if ambiguous {
+        reasons.push("All copies have equal quality — manual selection required".to_string());
+    } else {
+        reasons.push("All copies scored equally".to_string());
+    }
+
+    // Drop winner_reasons (they describe the winner's own penalties, which are
+    // the same as the losers' if it's a tie — not useful to surface).
+    let _ = winner_reasons;
+
+    let paths: Vec<String> = {
+        let mut p: Vec<String> = group
+            .iter()
+            .map(|f| f.relative_path.clone())
+            .collect();
+        p.sort();
+        p
+    };
+
+    DuplicateGroup {
+        paths,
+        suggested_keep: winner.relative_path.clone(),
+        reasons,
+        ambiguous,
+    }
+}
+
+/// Detect duplicate files and rank each group to produce a suggested keeper.
+/// Returns one `DuplicateGroup` per set of identical files (2+ members).
+/// Groups are sorted by their first path for deterministic output.
+fn resolve_duplicate_groups(files: &[&FileInfo]) -> Vec<DuplicateGroup> {
+    let raw_groups = group_files_by_hash(files);
+    raw_groups.iter().map(|g| rank_group(g)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +350,20 @@ struct ScanError {
     message: String,
 }
 
+/// A resolved duplicate group: the set of identical files with a suggested keeper.
+#[derive(Serialize)]
+pub struct DuplicateGroup {
+    /// All relative paths in this group (sorted).
+    pub paths: Vec<String>,
+    /// The path the engine recommends keeping.
+    pub suggested_keep: String,
+    /// Human-readable reasons explaining why `suggested_keep` was chosen.
+    pub reasons: Vec<String>,
+    /// True when the engine cannot determine a clear winner (equal scores + timestamps).
+    /// The user must choose manually.
+    pub ambiguous: bool,
+}
+
 /// A single item in the full directory listing emitted with the findings payload.
 #[derive(Serialize)]
 struct DirectoryEntry {
@@ -206,9 +387,9 @@ struct FindingsPayload {
     errors: Vec<ScanError>,
     /// Full directory listing — all folders and files under the selected root.
     entries: Vec<DirectoryEntry>,
-    /// Groups of files with identical SHA-256 content. Each inner vec contains
-    /// 2+ relative paths. Empty when no duplicates are found.
-    duplicate_groups: Vec<Vec<String>>,
+    /// Resolved duplicate groups. Each group has a suggested keeper and reasons.
+    /// Empty when no duplicates are found.
+    duplicate_groups: Vec<DuplicateGroup>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,8 +1439,8 @@ pub fn run(folder_path: &str) {
     }
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-    // Duplicate detection — group files with identical SHA-256 hashes.
-    let duplicate_groups = build_duplicate_groups(&all_files);
+    // Duplicate detection + ranking — group by hash, then score each group.
+    let duplicate_groups = resolve_duplicate_groups(&all_files);
 
     // R7 — emit findings payload
     let payload = FindingsPayload {
