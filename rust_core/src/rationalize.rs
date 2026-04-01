@@ -132,6 +132,18 @@ struct ScanError {
     message: String,
 }
 
+/// A single item in the full directory listing emitted with the findings payload.
+#[derive(Serialize)]
+struct DirectoryEntry {
+    /// Path relative to the selected folder (e.g. "cborn/My Documents/CBORN DOCS").
+    relative_path: String,
+    /// "folder" or "file"
+    entry_type: &'static str,
+    /// File size in bytes. None for folders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct FindingsPayload {
     #[serde(rename = "type")]
@@ -141,6 +153,8 @@ struct FindingsPayload {
     total_folders: usize,
     findings: Vec<Finding>,
     errors: Vec<ScanError>,
+    /// Full directory listing — all folders and files under the selected root.
+    entries: Vec<DirectoryEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1143,7 @@ pub fn run(folder_path: &str) {
                 path: folder_path.to_string(),
                 message: "Path does not exist or is not a directory".to_string(),
             }],
+            entries: vec![],
         };
         emit_json(&payload);
         return;
@@ -1146,6 +1161,30 @@ pub fn run(folder_path: &str) {
     // R4 + R5 — generate findings
     let findings = generate_findings(root, &folders);
 
+    // R7 — build full directory entry list from scanned folders + their files.
+    let mut entries: Vec<DirectoryEntry> = Vec::new();
+    for folder in &folders {
+        if folder.relative_path.is_empty() {
+            continue; // skip root itself — Flutter shows it as the header
+        }
+        entries.push(DirectoryEntry {
+            relative_path: folder.relative_path.clone(),
+            entry_type: "folder",
+            size_bytes: None,
+        });
+        for file in &folder.direct_files {
+            let size = fs::metadata(&file.absolute_path)
+                .map(|m| m.len())
+                .ok();
+            entries.push(DirectoryEntry {
+                relative_path: file.relative_path.clone(),
+                entry_type: "file",
+                size_bytes: size,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
     // R7 — emit findings payload
     let payload = FindingsPayload {
         event_type: "findings",
@@ -1154,6 +1193,7 @@ pub fn run(folder_path: &str) {
         total_folders,
         findings,
         errors,
+        entries,
     };
     emit_json(&payload);
 

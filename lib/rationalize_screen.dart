@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
@@ -42,6 +44,7 @@ class _TreeNode {
   final String absolutePath;
   final String name;
   final int depth;
+  final bool isFile;
 
   /// Engine finding on this exact path, if any.
   final RationalizeFinding? finding;
@@ -60,6 +63,7 @@ class _TreeNode {
     required this.absolutePath,
     required this.name,
     required this.depth,
+    this.isFile = false,
     this.finding,
     this.isRenamedTarget = false,
     this.isMovedTarget = false,
@@ -153,25 +157,39 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
       pathToFinding[f.path] = f;
     }
 
-    final allPaths = <String>{};
-    for (final f in payload.findings) {
-      _addAncestors(f.path, allPaths);
-    }
-    for (final rel in _userRemovedPaths.keys) {
-      _addAncestors(rel, allPaths);
-    }
-
-    final sorted = allPaths.toList()..sort();
-    return sorted.map((path) {
+    // Build from the full directory listing — every folder and file.
+    final nodes = payload.entries.map((entry) {
+      final path = entry.relativePath;
+      final parts = path.split('/');
       return _TreeNode(
         relativePath: path,
         absolutePath: '$base/$path',
-        name: path.split('/').last,
-        depth: path.split('/').length - 1,
-        finding: pathToFinding[path],
-        isUserRemoval: _userRemovedPaths.containsKey(path),
+        name: parts.last,
+        depth: parts.length - 1,
+        isFile: entry.isFile,
+        finding: entry.isFile ? null : pathToFinding[path],
+        isUserRemoval: !entry.isFile && _userRemovedPaths.containsKey(path),
       );
     }).toList();
+
+    // Also include any user-removed paths not already in the entry list
+    // (shouldn't happen, but defensive).
+    final existingPaths = nodes.map((n) => n.relativePath).toSet();
+    for (final rel in _userRemovedPaths.keys) {
+      if (!existingPaths.contains(rel)) {
+        final parts = rel.split('/');
+        nodes.add(_TreeNode(
+          relativePath: rel,
+          absolutePath: '$base/$rel',
+          name: parts.last,
+          depth: parts.length - 1,
+          isUserRemoval: true,
+        ));
+      }
+    }
+
+    nodes.sort((a, b) => a.relativePath.compareTo(b.relativePath));
+    return nodes;
   }
 
   /// Panel B: all engine findings applied by default; rejected findings reverted;
@@ -270,13 +288,6 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         if (_drawerFindingId == id) _drawerFindingId = null;
       });
 
-  void _acceptAll() => setState(() {
-        final p = _payload;
-        if (p == null) return;
-        for (final f in p.findings) {
-          _decisions[f.id] = true;
-        }
-      });
 
   void _markForRemoval(String relativePath, String absolutePath) =>
       setState(() => _userRemovedPaths[relativePath] = absolutePath);
@@ -682,6 +693,7 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                     child: _OriginalTreePanel(
                       nodes: originalNodes,
                       decisions: _decisions,
+                      userRemovedPaths: _userRemovedPaths,
                       drawerFindingId: _drawerFindingId,
                       onNodeTap: (node) {
                         if (node.finding != null) _openDrawer(node.finding!.id);
@@ -722,7 +734,6 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         _BottomBar(
           pendingCount: _pendingCount,
           rejectedCount: _rejectedCount,
-          onAcceptAll: _acceptAll,
           onApply: _pendingCount > 0 ? _applyChanges : null,
         ),
       ],
@@ -844,12 +855,19 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                     foregroundColor: _kText,
                     side: const BorderSide(color: _kDivider),
                   ),
-                  onPressed: () {
-                    // Cancel — leave the rationalized copy in place; user can
-                    // inspect it before committing.
+                  onPressed: () async {
+                    // Delete the rationalized copy — it's clutter if not committed.
+                    final targetPath = _buildResult?.targetPath;
+                    if (targetPath != null) {
+                      final dir = Directory(targetPath);
+                      if (dir.existsSync()) {
+                        await dir.delete(recursive: true);
+                      }
+                    }
+                    if (!mounted) return;
                     setState(() => _phase = _Phase.results);
                   },
-                  child: Text('Not yet — keep $targetName'),
+                  child: const Text('Not yet'),
                 ),
                 const SizedBox(width: 12),
                 ElevatedButton(
@@ -1040,6 +1058,7 @@ class _OriginalTreePanel extends StatelessWidget {
   const _OriginalTreePanel({
     required this.nodes,
     required this.decisions,
+    required this.userRemovedPaths,
     required this.drawerFindingId,
     required this.onNodeTap,
     required this.onNodeRightClick,
@@ -1047,6 +1066,7 @@ class _OriginalTreePanel extends StatelessWidget {
 
   final List<_TreeNode> nodes;
   final Map<String, bool> decisions;
+  final Map<String, String> userRemovedPaths;
   final String? drawerFindingId;
   final void Function(_TreeNode) onNodeTap;
   final void Function(BuildContext, Offset, _TreeNode) onNodeRightClick;
@@ -1055,7 +1075,10 @@ class _OriginalTreePanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        _PanelHeader(title: 'Original', subtitle: '${nodes.length} folders'),
+        _PanelHeader(
+          title: 'Original',
+          subtitle: '${nodes.where((n) => !n.isFile).length} folders · ${nodes.where((n) => n.isFile).length} files',
+        ),
         Expanded(
           child: ListView.builder(
             itemCount: nodes.length,
@@ -1064,7 +1087,11 @@ class _OriginalTreePanel extends StatelessWidget {
               final f = node.finding;
 
               Color? nameColor;
-              if (node.isUserRemoval) {
+              // Check if this node or any ancestor is user-marked for removal.
+              final isUnderUserRemoval = userRemovedPaths.keys.any((rp) =>
+                  node.relativePath == rp ||
+                  node.relativePath.startsWith('$rp/'));
+              if (node.isUserRemoval || isUnderUserRemoval) {
                 nameColor = _kUserRemoveColor;
               } else if (f != null) {
                 nameColor = switch (f.action) {
@@ -1080,6 +1107,7 @@ class _OriginalTreePanel extends StatelessWidget {
               return _TreeNodeRow(
                 name: node.name,
                 depth: node.depth,
+                isFile: node.isFile,
                 nameColor: isRejected ? _kSubtext : nameColor,
                 isItalic: false,
                 isStrikethrough: isRejected,
@@ -1115,7 +1143,10 @@ class _TargetTreePanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        _PanelHeader(title: 'Target', subtitle: '${nodes.length} folders'),
+        _PanelHeader(
+          title: 'Target',
+          subtitle: '${nodes.where((n) => !n.isFile).length} folders · ${nodes.where((n) => n.isFile).length} files',
+        ),
         Expanded(
           child: nodes.isEmpty
               ? const Center(
@@ -1140,6 +1171,7 @@ class _TargetTreePanel extends StatelessWidget {
                     return _TreeNodeRow(
                       name: node.name,
                       depth: node.depth,
+                      isFile: node.isFile,
                       nameColor: nameColor,
                       isItalic: isItalic,
                       isStrikethrough: false,
@@ -1208,6 +1240,7 @@ class _TreeNodeRow extends StatelessWidget {
     required this.isFocused,
     required this.onTap,
     required this.onSecondaryTap,
+    this.isFile = false,
   });
 
   final String name;
@@ -1217,13 +1250,14 @@ class _TreeNodeRow extends StatelessWidget {
   final bool isStrikethrough;
   final bool? decision; // true=accepted, false=rejected, null=default
   final bool isFocused;
+  final bool isFile;
   final VoidCallback? onTap;
   final void Function(Offset)? onSecondaryTap;
 
   @override
   Widget build(BuildContext context) {
-    final textColor = nameColor ?? _kText;
-    final folderIconColor = nameColor ?? const Color(0xFF4FC1FF);
+    final textColor = nameColor ?? (isFile ? _kSubtext : _kText);
+    final iconColor = nameColor ?? (isFile ? _kSubtext : const Color(0xFF4FC1FF));
 
     return GestureDetector(
       onTap: onTap,
@@ -1231,14 +1265,18 @@ class _TreeNodeRow extends StatelessWidget {
           ? (d) => onSecondaryTap!(d.globalPosition)
           : null,
       child: Container(
-        height: 26,
+        height: 22,
         color: isFocused
             ? _kBlue.withValues(alpha: 0.2)
             : Colors.transparent,
         padding: EdgeInsets.only(left: 12.0 + depth * 16.0, right: 8),
         child: Row(
           children: [
-            Icon(Icons.folder, size: 14, color: folderIconColor),
+            Icon(
+              isFile ? Icons.insert_drive_file_outlined : Icons.folder,
+              size: 13,
+              color: iconColor,
+            ),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
@@ -1619,13 +1657,11 @@ class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.pendingCount,
     required this.rejectedCount,
-    required this.onAcceptAll,
     required this.onApply,
   });
 
   final int pendingCount;
   final int rejectedCount;
-  final VoidCallback onAcceptAll;
   final VoidCallback? onApply;
 
   @override
@@ -1647,12 +1683,6 @@ class _BottomBar extends StatelessWidget {
                 style: const TextStyle(color: _kSubtext, fontSize: 12)),
           ],
           const Spacer(),
-          TextButton(
-            style: TextButton.styleFrom(foregroundColor: _kText),
-            onPressed: onAcceptAll,
-            child: const Text('Accept All',
-                style: TextStyle(fontSize: 12)),
-          ),
           const SizedBox(width: 8),
           ElevatedButton(
             style: ElevatedButton.styleFrom(

@@ -159,12 +159,34 @@ class ScanErrorEntry {
   }
 }
 
+/// One entry in the full directory listing returned with the findings payload.
+class DirectoryEntry {
+  final String relativePath;
+  final bool isFile;
+  final int? sizeBytes;
+
+  const DirectoryEntry({
+    required this.relativePath,
+    required this.isFile,
+    this.sizeBytes,
+  });
+
+  factory DirectoryEntry.fromJson(Map<String, dynamic> json) {
+    return DirectoryEntry(
+      relativePath: json['relative_path'] as String? ?? '',
+      isFile: (json['entry_type'] as String? ?? '') == 'file',
+      sizeBytes: json['size_bytes'] as int?,
+    );
+  }
+}
+
 class FindingsPayload {
   final String selectedFolder;
   final String scannedAt;
   final int totalFolders;
   final List<RationalizeFinding> findings;
   final List<ScanErrorEntry> errors;
+  final List<DirectoryEntry> entries;
 
   const FindingsPayload({
     required this.selectedFolder,
@@ -172,11 +194,13 @@ class FindingsPayload {
     required this.totalFolders,
     required this.findings,
     required this.errors,
+    required this.entries,
   });
 
   factory FindingsPayload.fromJson(Map<String, dynamic> json) {
     final rawFindings = json['findings'] as List<dynamic>? ?? [];
     final rawErrors = json['errors'] as List<dynamic>? ?? [];
+    final rawEntries = json['entries'] as List<dynamic>? ?? [];
     return FindingsPayload(
       selectedFolder: json['selected_folder'] as String? ?? '',
       scannedAt: json['scanned_at'] as String? ?? '',
@@ -187,6 +211,9 @@ class FindingsPayload {
           .toList(),
       errors: rawErrors
           .map((e) => ScanErrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      entries: rawEntries
+          .map((e) => DirectoryEntry.fromJson(e as Map<String, dynamic>))
           .toList(),
     );
   }
