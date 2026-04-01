@@ -61,8 +61,18 @@ Takes a single directory, analyses its structure, and produces a rationalized ve
 5. User reviews build stats; confirms swap
 6. Source renamed to `source.OLD`; copy renamed to `source`
 
-### Current status
-**This is what FileSteward builds today.** The rationalize screen, copy-then-swap, and naming engine are all Maintain.
+### Current status — Iteration 4 complete (v0.4.0)
+**This is what FileSteward builds today.** The rationalize screen, copy-then-swap execution model, naming engine, and duplicate file resolution are all Maintain.
+
+Completed capabilities:
+- Side-by-side Original / Target directory tree with collapse/expand
+- Structural findings: empty folders, naming inconsistencies, excessive nesting, misplaced files
+- SHA-256 duplicate detection: groups identical files by hash
+- Penalty-based ranker: auto-resolves most duplicate groups; flags ambiguous groups for user decision
+- Duplicate resolution panel: shows auto-resolved summary + per-group keeper selection for ambiguous cases
+- Apply is blocked until all ambiguous groups are resolved
+- Build step omits non-kept duplicate copies from the rationalized output
+- Atomic swap: source renamed to `.OLD`; rationalized copy takes source name
 
 ---
 
@@ -70,14 +80,17 @@ Takes a single directory, analyses its structure, and produces a rationalized ve
 
 Both products run on the same Rust engine:
 
-| Capability | Consolidate | Maintain |
-|---|---|---|
-| Recursive directory walk | ✓ | ✓ |
-| SHA-256 file fingerprinting | ✓ | ✓ |
-| Duplicate detection | ✓ | ✓ |
-| Naming convention analysis | — | ✓ |
-| Build (copy with transformations) | ✓ | ✓ |
-| Swap | — | ✓ |
+| Capability | Consolidate | Maintain | Status |
+|---|---|---|---|
+| Recursive directory walk | ✓ | ✓ | ✅ Done |
+| SHA-256 file fingerprinting | ✓ | ✓ | ✅ Done |
+| Exact duplicate detection (group by hash) | ✓ | ✓ | ✅ Done |
+| Penalty-based duplicate ranker | ✓ | ✓ | ✅ Done |
+| Naming convention analysis | — | ✓ | ✅ Done |
+| Build (copy with transformations) | ✓ | ✓ | ✅ Done |
+| Swap | — | ✓ | ✅ Done |
+| Multi-source walk + fold-in | ✓ | — | Iteration 5 |
+| Rust library restructure (#79) | ✓ | ✓ | Iteration 5 |
 
 ---
 
@@ -95,4 +108,8 @@ FileSteward Consolidate and FileSteward Maintain ship separately, sharing the Ru
 
 ## What this means for the roadmap
 
-Iteration 4 should not start until this document is agreed. The main screen redesign (#74), multi-folder selection (#38), and all consolidation work must be designed against this definition — not the original iteration plan, which predates this distinction.
+**Iteration 4 is complete.** Maintain v0.4.0 ships with full duplicate detection and resolution.
+
+**Iteration 5 — Consolidate v1** is next. The main screen will need a mode selector or a second
+entry point. Multi-folder selection (#38), the shared Rust library restructure (#79), and the
+Consolidate engine are all in scope. Design those features against this definition.

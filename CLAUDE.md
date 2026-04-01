@@ -98,20 +98,14 @@ It is **not** a bulk-delete tool; it is an analysis and decision-support tool. E
 - Splash screen with version number
 - Draft PR convention + CONTRIBUTING.md
 
-### Iteration 4 — Duplicate File Detection *(current)*
-**Goal:** Complete the Maintain workflow by adding content-based duplicate detection and file-level resolution within a single directory tree.
-
-**What "done" looks like:**
-> "I scanned My Photos. FileSteward found 47 duplicate files across 12 groups. I reviewed each group, kept the best copy, removed the rest. Built and swapped."
-
-**Scope:**
-- Wire SHA-256 hashing into the rationalize scan (infrastructure exists in `main.rs`, needs porting to `rationalize.rs`)
-- Emit `duplicate_file` findings grouping files by hash
-- Show duplicate groups in the rationalize UI; right-click file actions (keep / remove this copy)
-- Build step already handles file skips via skip table — no engine changes needed there
-- Update `docs/product-definition.md` to reflect Maintain-first approach and two-app decision
-
-**Out of scope:** Consolidate, library restructure (#79), near-duplicate similarity detection, rules engine.
+### Iteration 4 — Duplicate File Detection ✅ Complete (v0.4.0)
+- SHA-256 hashing wired into the rationalize scan
+- Penalty-based duplicate ranker: auto-resolves clear cases, flags ambiguous groups for user decision
+- Duplicate resolution panel below the tree: auto-resolved summary + keeper selection for ambiguous groups
+- Apply blocked until all ambiguous groups resolved
+- Build step omits non-kept duplicate copies via `duplicate_removals`
+- Collapsible/expandable folder nodes in both tree panels (depth ≥ 2 starts collapsed)
+- `docs/product-definition.md` updated to reflect Maintain-first approach and two-app vision
 
 ### Iteration 5 — Consolidate App (first version)
 **Goal:** FileSteward Consolidate v1. Multiple source directories → one canonical output.
