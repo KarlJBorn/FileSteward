@@ -113,6 +113,11 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // Currently open detail drawer finding id.
   String? _drawerFindingId;
 
+  // Collapsed folder paths for each panel — independent state.
+  // Folders at depth ≥ 2 start collapsed when a scan completes.
+  final Set<String> _collapsedOriginal = {};
+  final Set<String> _collapsedTarget = {};
+
   // Duplicate group decisions: group index → chosen path to keep.
   // Auto-resolved groups are pre-filled with suggestedKeep.
   // Ambiguous groups start as null (user must choose before Apply).
@@ -362,6 +367,8 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
       _buildFoldersDone = 0;
       _buildFoldersTotal = 0;
       _buildCurrentPath = '';
+      _collapsedOriginal.clear();
+      _collapsedTarget.clear();
     });
 
     final session = await _service.startSession(path);
@@ -386,12 +393,24 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
             final g = payload.duplicateGroups[i];
             choices[i] = g.ambiguous ? null : g.suggestedKeep;
           }
+          // Folders at depth ≥ 2 start collapsed (top two levels visible by default).
+          final collapsed = payload.entries
+              .where((e) => !e.isFile)
+              .map((e) => e.relativePath)
+              .where((p) => p.split('/').length >= 2)
+              .toSet();
           setState(() {
             _payload = payload;
             _phase = _Phase.findings;
             _duplicateChoices
               ..clear()
               ..addAll(choices);
+            _collapsedOriginal
+              ..clear()
+              ..addAll(collapsed);
+            _collapsedTarget
+              ..clear()
+              ..addAll(collapsed);
           });
         case RationalizeError(:final message):
           _showError(message);
@@ -787,10 +806,18 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                       decisions: _decisions,
                       userRemovedPaths: _userRemovedPaths,
                       drawerFindingId: _drawerFindingId,
+                      collapsed: _collapsedOriginal,
                       onNodeTap: (node) {
                         if (node.finding != null) _openDrawer(node.finding!.id);
                       },
                       onNodeRightClick: _showContextMenu,
+                      onToggleCollapse: (path) => setState(() {
+                        if (_collapsedOriginal.contains(path)) {
+                          _collapsedOriginal.remove(path);
+                        } else {
+                          _collapsedOriginal.add(path);
+                        }
+                      }),
                     ),
                   ),
                   Container(width: 1, color: _kDivider),
@@ -799,9 +826,17 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                     child: _TargetTreePanel(
                       nodes: targetNodes,
                       drawerFindingId: _drawerFindingId,
+                      collapsed: _collapsedTarget,
                       onNodeTap: (node) {
                         if (node.finding != null) _openDrawer(node.finding!.id);
                       },
+                      onToggleCollapse: (path) => setState(() {
+                        if (_collapsedTarget.contains(path)) {
+                          _collapsedTarget.remove(path);
+                        } else {
+                          _collapsedTarget.add(path);
+                        }
+                      }),
                     ),
                   ),
                 ],
@@ -1220,30 +1255,56 @@ class _OriginalTreePanel extends StatelessWidget {
     required this.decisions,
     required this.userRemovedPaths,
     required this.drawerFindingId,
+    required this.collapsed,
     required this.onNodeTap,
     required this.onNodeRightClick,
+    required this.onToggleCollapse,
   });
 
   final List<_TreeNode> nodes;
   final Map<String, bool> decisions;
   final Map<String, String> userRemovedPaths;
   final String? drawerFindingId;
+  final Set<String> collapsed;
   final void Function(_TreeNode) onNodeTap;
   final void Function(BuildContext, Offset, _TreeNode) onNodeRightClick;
+  final void Function(String) onToggleCollapse;
+
+  /// Returns true if any ancestor folder of [path] is in [collapsed].
+  static bool _isHidden(String path, Set<String> collapsed) {
+    var p = path;
+    while (true) {
+      final slash = p.lastIndexOf('/');
+      if (slash < 0) return false;
+      p = p.substring(0, slash);
+      if (collapsed.contains(p)) return true;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Compute which folder paths have at least one child in the full list.
+    final hasChildrenSet = <String>{};
+    for (final n in nodes) {
+      final slash = n.relativePath.lastIndexOf('/');
+      if (slash > 0) hasChildrenSet.add(n.relativePath.substring(0, slash));
+    }
+
+    final visible =
+        nodes.where((n) => !_isHidden(n.relativePath, collapsed)).toList();
+
     return Column(
       children: [
         _PanelHeader(
           title: 'Original',
-          subtitle: '${nodes.where((n) => !n.isFile).length} folders · ${nodes.where((n) => n.isFile).length} files',
+          subtitle:
+              '${nodes.where((n) => !n.isFile).length} folders · ${nodes.where((n) => n.isFile).length} files',
         ),
         Expanded(
           child: ListView.builder(
-            itemCount: nodes.length,
+            itemCount: visible.length,
             itemBuilder: (ctx, i) {
-              final node = nodes[i];
+              final node = visible[i];
               final f = node.finding;
 
               Color? nameColor;
@@ -1263,6 +1324,8 @@ class _OriginalTreePanel extends StatelessWidget {
 
               // Dim color when explicitly rejected.
               final isRejected = f != null && decisions[f.id] == false;
+              final hasChildren = hasChildrenSet.contains(node.relativePath);
+              final isCollapsed = collapsed.contains(node.relativePath);
 
               return _TreeNodeRow(
                 name: node.name,
@@ -1273,6 +1336,11 @@ class _OriginalTreePanel extends StatelessWidget {
                 isStrikethrough: isRejected,
                 decision: f != null ? decisions[f.id] : null,
                 isFocused: f != null && f.id == drawerFindingId,
+                hasChildren: hasChildren,
+                isCollapsed: isCollapsed,
+                onChevronTap: hasChildren
+                    ? () => onToggleCollapse(node.relativePath)
+                    : null,
                 onTap: () => onNodeTap(node),
                 onSecondaryTap: (pos) => onNodeRightClick(ctx, pos, node),
               );
@@ -1292,20 +1360,46 @@ class _TargetTreePanel extends StatelessWidget {
   const _TargetTreePanel({
     required this.nodes,
     required this.drawerFindingId,
+    required this.collapsed,
     required this.onNodeTap,
+    required this.onToggleCollapse,
   });
 
   final List<_TreeNode> nodes;
   final String? drawerFindingId;
+  final Set<String> collapsed;
   final void Function(_TreeNode) onNodeTap;
+  final void Function(String) onToggleCollapse;
+
+  /// Returns true if any ancestor folder of [path] is in [collapsed].
+  static bool _isHidden(String path, Set<String> collapsed) {
+    var p = path;
+    while (true) {
+      final slash = p.lastIndexOf('/');
+      if (slash < 0) return false;
+      p = p.substring(0, slash);
+      if (collapsed.contains(p)) return true;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Compute which folder paths have at least one child in the full list.
+    final hasChildrenSet = <String>{};
+    for (final n in nodes) {
+      final slash = n.relativePath.lastIndexOf('/');
+      if (slash > 0) hasChildrenSet.add(n.relativePath.substring(0, slash));
+    }
+
+    final visible =
+        nodes.where((n) => !_isHidden(n.relativePath, collapsed)).toList();
+
     return Column(
       children: [
         _PanelHeader(
           title: 'Target',
-          subtitle: '${nodes.where((n) => !n.isFile).length} folders · ${nodes.where((n) => n.isFile).length} files',
+          subtitle:
+              '${nodes.where((n) => !n.isFile).length} folders · ${nodes.where((n) => n.isFile).length} files',
         ),
         Expanded(
           child: nodes.isEmpty
@@ -1316,9 +1410,9 @@ class _TargetTreePanel extends StatelessWidget {
                   ),
                 )
               : ListView.builder(
-                  itemCount: nodes.length,
+                  itemCount: visible.length,
                   itemBuilder: (_, i) {
-                    final node = nodes[i];
+                    final node = visible[i];
                     final f = node.finding;
 
                     Color? nameColor;
@@ -1327,6 +1421,10 @@ class _TargetTreePanel extends StatelessWidget {
                       nameColor = _kRenameTargetColor;
                       isItalic = true;
                     }
+
+                    final hasChildren =
+                        hasChildrenSet.contains(node.relativePath);
+                    final isCollapsed = collapsed.contains(node.relativePath);
 
                     return _TreeNodeRow(
                       name: node.name,
@@ -1337,6 +1435,11 @@ class _TargetTreePanel extends StatelessWidget {
                       isStrikethrough: false,
                       decision: null,
                       isFocused: f != null && f.id == drawerFindingId,
+                      hasChildren: hasChildren,
+                      isCollapsed: isCollapsed,
+                      onChevronTap: hasChildren
+                          ? () => onToggleCollapse(node.relativePath)
+                          : null,
                       onTap: () => onNodeTap(node),
                       onSecondaryTap: null,
                     );
@@ -1401,6 +1504,9 @@ class _TreeNodeRow extends StatelessWidget {
     required this.onTap,
     required this.onSecondaryTap,
     this.isFile = false,
+    this.hasChildren = false,
+    this.isCollapsed = false,
+    this.onChevronTap,
   });
 
   final String name;
@@ -1411,6 +1517,9 @@ class _TreeNodeRow extends StatelessWidget {
   final bool? decision; // true=accepted, false=rejected, null=default
   final bool isFocused;
   final bool isFile;
+  final bool hasChildren;
+  final bool isCollapsed;
+  final VoidCallback? onChevronTap;
   final VoidCallback? onTap;
   final void Function(Offset)? onSecondaryTap;
 
@@ -1432,6 +1541,22 @@ class _TreeNodeRow extends StatelessWidget {
         padding: EdgeInsets.only(left: 12.0 + depth * 16.0, right: 8),
         child: Row(
           children: [
+            // Chevron slot — 14px wide for all nodes for consistent alignment.
+            SizedBox(
+              width: 14,
+              child: !isFile && hasChildren
+                  ? GestureDetector(
+                      onTap: onChevronTap,
+                      child: Icon(
+                        isCollapsed
+                            ? Icons.chevron_right
+                            : Icons.expand_more,
+                        size: 14,
+                        color: _kSubtext,
+                      ),
+                    )
+                  : null,
+            ),
             Icon(
               isFile ? Icons.insert_drive_file_outlined : Icons.folder,
               size: 13,
