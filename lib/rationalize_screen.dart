@@ -897,11 +897,10 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
     final buildResult = _buildResult;
 
     if (swapResult != null) {
-      // Swap completed (success or failure).
       final ok = swapResult.succeeded;
       return Center(
         child: SizedBox(
-          width: 420,
+          width: 480,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -916,8 +915,11 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                 style: const TextStyle(
                     color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
               if (ok) ...[
+                if (buildResult != null)
+                  _BuildStatsRow(result: buildResult),
+                const SizedBox(height: 12),
                 Text(
                   'Original backed up at:\n${swapResult.oldPath}',
                   textAlign: TextAlign.center,
@@ -939,11 +941,10 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
     }
 
     if (buildResult != null) {
-      // Build completed but swap was cancelled or failed before running.
       final ok = buildResult.succeeded;
       return Center(
         child: SizedBox(
-          width: 420,
+          width: 480,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -958,11 +959,12 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
                 style: const TextStyle(
                     color: _kText, fontSize: 16, fontWeight: FontWeight.w600),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
               if (ok) ...[
+                _BuildStatsRow(result: buildResult),
+                const SizedBox(height: 12),
                 Text(
-                  'Rationalized copy is at:\n${buildResult.targetPath}\n\n'
-                  'Your original is untouched.',
+                  'Rationalized copy at:\n${buildResult.targetPath}\n\nYour original is untouched.',
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: _kSubtext, fontSize: 12),
                 ),
@@ -1016,6 +1018,58 @@ class _SwapRow extends StatelessWidget {
 
 // ---------------------------------------------------------------------------
 // _ResultButtons — Done + Re-scan row reused in results screens
+// ---------------------------------------------------------------------------
+// _BuildStatsRow — folder/file/omitted counts from a completed build
+// ---------------------------------------------------------------------------
+
+class _BuildStatsRow extends StatelessWidget {
+  const _BuildStatsRow({required this.result});
+  final BuildResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: _kPanelBg,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: _kDivider),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          _StatCell(label: 'Folders copied', value: '${result.foldersCopied}', color: _kSuccessBadge),
+          _StatCell(label: 'Files copied', value: '${result.filesCopied}', color: _kSuccessBadge),
+          _StatCell(label: 'Folders omitted', value: '${result.foldersOmitted}',
+              color: result.foldersOmitted > 0 ? _kWarningBadge : _kSubtext),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatCell extends StatelessWidget {
+  const _StatCell({required this.label, required this.value, required this.color});
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(value,
+            style: TextStyle(
+                color: color, fontSize: 22, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        Text(label,
+            style: const TextStyle(color: _kSubtext, fontSize: 11)),
+      ],
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 class _ResultButtons extends StatelessWidget {
