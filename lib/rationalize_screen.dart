@@ -1086,13 +1086,28 @@ class _OriginalTreePanel extends StatelessWidget {
               final node = nodes[i];
               final f = node.finding;
 
-              Color? nameColor;
               // Check if this node or any ancestor is user-marked for removal.
               final isUnderUserRemoval = userRemovedPaths.keys.any((rp) =>
                   node.relativePath == rp ||
                   node.relativePath.startsWith('$rp/'));
+
+              final isRejected = f != null && decisions[f.id] == false;
+
+              // Strikethrough = folder will be absent from the target:
+              //   • engine remove finding that hasn't been rejected
+              //   • user-initiated removal (direct or inherited)
+              final isActiveRemoval = node.isUserRemoval ||
+                  isUnderUserRemoval ||
+                  (!isRejected &&
+                      f != null &&
+                      f.action == FindingAction.remove);
+
+              Color? nameColor;
               if (node.isUserRemoval || isUnderUserRemoval) {
                 nameColor = _kUserRemoveColor;
+              } else if (isRejected) {
+                // Dismissed finding — dim back to subtext; no action color.
+                nameColor = _kSubtext;
               } else if (f != null) {
                 nameColor = switch (f.action) {
                   FindingAction.remove => _kRemoveColor,
@@ -1101,16 +1116,13 @@ class _OriginalTreePanel extends StatelessWidget {
                 };
               }
 
-              // Dim color when explicitly rejected.
-              final isRejected = f != null && decisions[f.id] == false;
-
               return _TreeNodeRow(
                 name: node.name,
                 depth: node.depth,
                 isFile: node.isFile,
-                nameColor: isRejected ? _kSubtext : nameColor,
+                nameColor: nameColor,
                 isItalic: false,
-                isStrikethrough: isRejected,
+                isStrikethrough: isActiveRemoval,
                 decision: f != null ? decisions[f.id] : null,
                 isFocused: f != null && f.id == drawerFindingId,
                 onTap: () => onNodeTap(node),
@@ -1288,7 +1300,7 @@ class _TreeNodeRow extends StatelessWidget {
                   decoration: isStrikethrough
                       ? TextDecoration.lineThrough
                       : TextDecoration.none,
-                  decorationColor: _kSubtext,
+                  decorationColor: textColor,
                 ),
                 overflow: TextOverflow.ellipsis,
               ),
