@@ -8,7 +8,15 @@ void main() {
   ) async {
     await tester.pumpWidget(const FileStewardApp());
 
-    // App bar title.
+    // Splash screen should be visible first.
+    expect(find.text('FileSteward'), findsOneWidget);
+    expect(find.text('v0.3.1'), findsOneWidget);
+
+    // Advance past the splash timer and settle the navigation animation.
+    await tester.pump(const Duration(milliseconds: 1500));
+    await tester.pumpAndSettle();
+
+    // App bar title still present on home page.
     expect(find.text('FileSteward'), findsOneWidget);
 
     // Folder selection button visible before any folder is chosen.
