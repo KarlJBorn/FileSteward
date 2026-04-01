@@ -448,11 +448,24 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
         .replaceAll(RegExp(r'/$'), '');
     final targetPath = '$sourceParent/${sourceName}_rationalized';
 
+    // Collect duplicate removals: for each group, all paths except the chosen keeper.
+    final duplicateRemovals = <String>[];
+    for (var i = 0; i < payload.duplicateGroups.length; i++) {
+      final group = payload.duplicateGroups[i];
+      final keep = _duplicateChoices[i];
+      if (keep != null) {
+        for (final path in group.paths) {
+          if (path != keep) duplicateRemovals.add(path);
+        }
+      }
+    }
+
     final cmd = BuildCommand(
       sourcePath: folder,
       targetPath: targetPath,
       sessionId: sessionId,
       actions: [...engineActions, ...userActions],
+      duplicateRemovals: duplicateRemovals,
     );
 
     setState(() {
