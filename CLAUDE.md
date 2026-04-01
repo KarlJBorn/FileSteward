@@ -34,6 +34,18 @@ cargo test --manifest-path rust_core/Cargo.toml test_name_here
 
 Always build Rust before running Flutter (`make rust-build` first) since Flutter invokes the Rust binary at runtime.
 
+## Working Patterns
+
+**Merge before starting new work.** Always pull main before branching for a new task. If Karl hasn't merged the outstanding PR before asking for the next one, remind him — don't proceed without it.
+
+**PR workflow.** PRs are opened by the `SpringAgents` gh CLI account (set via `gh auth switch --user SpringAgents` — the SessionStart hook handles this automatically). Karl approves and merges in the browser. Never push directly to main.
+
+**Do it proactively.** Update docs, CLAUDE.md, and open PRs as part of completing a task — don't wait to be asked.
+
+**No subagents.** Do all work inline. Don't spawn subagents unless Karl explicitly asks or the task genuinely requires parallelism. Subagents consume quota faster and Karl prefers direct work while the project is in early iterations.
+
+**Never invent commands.** Don't fabricate slash commands or CLI flags. If unsure whether something exists, check first.
+
 ## Product Vision
 
 FileSteward will ship as **two separate apps** sharing a common Rust engine. See `docs/product-definition.md` for the full definition.
