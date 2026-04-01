@@ -473,6 +473,9 @@ class _RationalizeScreenState extends State<RationalizeScreen> {
   // ---------------------------------------------------------------------------
 
   void _showContextMenu(BuildContext ctx, Offset pos, _TreeNode node) {
+    // Files don't have folder-level actions.
+    if (node.isFile) return;
+
     final finding = node.finding;
     final isUserMarked = _userRemovedPaths.containsKey(node.relativePath);
     final decision = finding != null ? _decisions[finding.id] : null;
