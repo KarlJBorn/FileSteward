@@ -86,9 +86,34 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // Source selection helpers
   // ---------------------------------------------------------------------------
 
+  /// Returns true if [path] is a volume root or system directory that should
+  /// never be scanned (e.g. /, /Volumes/Macintosh HD, /System, /Users).
+  bool _isDangerousPath(String path) {
+    final normalized = path.endsWith('/')
+        ? path.substring(0, path.length - 1)
+        : path;
+    final parts = normalized.split('/').where((p) => p.isNotEmpty).toList();
+    // Root itself, or a top-level system directory.
+    if (parts.isEmpty) return true;
+    if (parts.length == 1) return true; // e.g. /Volumes
+    // /Volumes/<disk name> — volume roots.
+    if (parts.length == 2 && parts[0] == 'Volumes') return true;
+    // Common macOS system directories at depth 1.
+    const systemDirs = {
+      'System', 'Library', 'Applications', 'bin', 'sbin',
+      'usr', 'etc', 'var', 'private', 'cores', 'opt',
+    };
+    if (parts.length == 1 && systemDirs.contains(parts[0])) return true;
+    return false;
+  }
+
   Future<void> _pickPrimary() async {
     final path = await getDirectoryPath();
     if (path == null || path.isEmpty) return;
+    if (_isDangerousPath(path)) {
+      _showVolumeRootError();
+      return;
+    }
     setState(() {
       _primaryPath = path;
     });
@@ -98,10 +123,25 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     if (_secondaryPaths.length >= 2) return;
     final path = await getDirectoryPath();
     if (path == null || path.isEmpty) return;
+    if (_isDangerousPath(path)) {
+      _showVolumeRootError();
+      return;
+    }
     if (path == _primaryPath || _secondaryPaths.contains(path)) return;
     setState(() {
       _secondaryPaths.add(path);
     });
+  }
+
+  void _showVolumeRootError() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Please select a specific folder, not a whole drive or volume root.',
+        ),
+        duration: Duration(seconds: 4),
+      ),
+    );
   }
 
   void _removeSecondary(int index) {
