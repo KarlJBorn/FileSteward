@@ -87,6 +87,10 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     });
   }
 
+  // Resume
+  ConsolidateScanComplete? _resumableSession;
+  bool _checkingResume = false;
+
   // Scan
   String _scanProgressSource = '';
   List<String> _scanSources = []; // primary + secondaries in order
@@ -179,8 +183,10 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     }
     setState(() {
       _primaryPath = path;
+      _resumableSession = null;
     });
     _autoPopulateTarget(path);
+    _checkForResumableSession();
   }
 
   Future<void> _addSecondary() async {
@@ -194,7 +200,9 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     if (path == _primaryPath || _secondaryPaths.contains(path)) return;
     setState(() {
       _secondaryPaths.add(path);
+      _resumableSession = null;
     });
+    _checkForResumableSession();
   }
 
   Future<void> _pickTargetParent() async {
@@ -217,10 +225,50 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     );
   }
 
+  Future<void> _checkForResumableSession() async {
+    final primary = _primaryPath;
+    if (primary == null || _secondaryPaths.isEmpty) {
+      setState(() => _resumableSession = null);
+      return;
+    }
+    setState(() => _checkingResume = true);
+    ConsolidateScanComplete? found;
+    await for (final event in _service.load(
+      primary: primary,
+      secondaries: List.unmodifiable(_secondaryPaths),
+    )) {
+      if (event is ConsolidateScanComplete) found = event;
+    }
+    if (mounted) {
+      setState(() {
+        _resumableSession = found;
+        _checkingResume = false;
+      });
+    }
+  }
+
+  void _resumeSession(ConsolidateScanComplete result) {
+    final items = <_ReviewItem>[];
+    for (final diff in result.secondaries) {
+      for (final file in diff.uniqueFiles) {
+        items.add(_ReviewItem(secondaryPath: diff.path, file: file));
+      }
+    }
+    setState(() {
+      _sessionId = result.sessionId;
+      _diffs = result.secondaries;
+      _reviewItems = items;
+      _phase = _Phase.review;
+      _resumableSession = null;
+    });
+  }
+
   void _removeSecondary(int index) {
     setState(() {
       _secondaryPaths.removeAt(index);
+      _resumableSession = null;
     });
+    _checkForResumableSession();
   }
 
   bool get _canScan =>
@@ -578,14 +626,32 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
           ),
         ),
         _BottomBar(
-          child: ElevatedButton.icon(
-            onPressed: _canScan ? _startScan : null,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF0E70C0),
-              foregroundColor: Colors.white,
-            ),
-            icon: const Icon(Icons.search),
-            label: const Text('Scan Sources'),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (_checkingResume)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: LinearProgressIndicator(),
+                )
+              else if (_resumableSession != null) ...[
+                _ResumeScanCard(
+                  session: _resumableSession!,
+                  onResume: () => _resumeSession(_resumableSession!),
+                ),
+                const SizedBox(height: 8),
+              ],
+              ElevatedButton.icon(
+                onPressed: _canScan ? _startScan : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0E70C0),
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.search),
+                label: const Text('Scan Sources'),
+              ),
+            ],
           ),
         ),
       ],
@@ -861,6 +927,59 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 // ---------------------------------------------------------------------------
 // Small reusable widgets
 // ---------------------------------------------------------------------------
+
+class _ResumeScanCard extends StatelessWidget {
+  final ConsolidateScanComplete session;
+  final VoidCallback onResume;
+
+  const _ResumeScanCard({required this.session, required this.onResume});
+
+  int get _totalUniqueFiles =>
+      session.secondaries.fold(0, (s, d) => s + d.uniqueFiles.length);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.teal[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.teal[200]!),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.history, size: 18, color: Colors.teal[700]),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Previous scan available',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                    color: Colors.teal[800],
+                  ),
+                ),
+                Text(
+                  '$_totalUniqueFiles unique files found — skip straight to review',
+                  style: TextStyle(fontSize: 12, color: Colors.teal[700]),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            onPressed: onResume,
+            style: TextButton.styleFrom(foregroundColor: Colors.teal[700]),
+            child: const Text('Resume'),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _ScanSourceRow extends StatelessWidget {
   final String label;

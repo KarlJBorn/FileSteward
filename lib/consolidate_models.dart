@@ -106,6 +106,10 @@ class ConsolidateError extends ConsolidateEvent {
       ConsolidateError(message: json['message'] as String);
 }
 
+class ConsolidateLoadNotFound extends ConsolidateEvent {
+  ConsolidateLoadNotFound();
+}
+
 ConsolidateEvent? parseConsolidateEvent(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   return switch (type) {
@@ -114,6 +118,7 @@ ConsolidateEvent? parseConsolidateEvent(Map<String, dynamic> json) {
     'consolidate_build_complete' => ConsolidateBuildComplete.fromJson(json),
     'consolidate_finalize_complete' =>
       ConsolidateFinalizeComplete.fromJson(json),
+    'consolidate_load_not_found' => ConsolidateLoadNotFound(),
     'consolidate_error' => ConsolidateError.fromJson(json),
     _ => null,
   };

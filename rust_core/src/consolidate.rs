@@ -59,6 +59,10 @@ struct SecondaryRecord {
     files_folded_in: usize,
     files_skipped: usize,
     skipped: Vec<String>,
+    /// Unique files found during the scan phase — persisted so the scan
+    /// can be resumed without rehashing.
+    #[serde(default)]
+    unique_files: Vec<UniqueFile>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -86,6 +90,13 @@ enum ConsolidateCommand {
     ConsolidateScan(ScanCmd),
     ConsolidateBuild(BuildCmd),
     ConsolidateFinalize(FinalizeCmd),
+    ConsolidateLoad(LoadCmd),
+}
+
+#[derive(Deserialize)]
+struct LoadCmd {
+    primary: String,
+    secondaries: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -130,7 +141,7 @@ struct ConsolidateProgressEvent {
     files_scanned: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct UniqueFile {
     relative_path: String,
     size_bytes: u64,
@@ -165,6 +176,12 @@ struct ConsolidateFinalizeComplete {
     #[serde(rename = "type")]
     event_type: &'static str,
     session_id: String,
+}
+
+#[derive(Serialize)]
+struct ConsolidateLoadNotFound {
+    #[serde(rename = "type")]
+    event_type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -517,7 +534,25 @@ fn handle_scan(cmd: ScanCmd) {
         });
     }
 
-    // Write session to registry as in_progress.
+    // Write session to registry, including unique file lists so the scan
+    // can be resumed without rehashing.
+    let analyzed = now_iso();
+    let registry_secondaries: Vec<SecondaryRecord> = secondary_results
+        .iter()
+        .map(|s| SecondaryRecord {
+            path: s.path.clone(),
+            analyzed: analyzed.clone(),
+            status: "scanned".to_string(),
+            files_folded_in: 0,
+            files_skipped: 0,
+            skipped: vec![],
+            unique_files: s.unique_files.iter().map(|f| UniqueFile {
+                relative_path: f.relative_path.clone(),
+                size_bytes: f.size_bytes,
+            }).collect(),
+        })
+        .collect();
+
     let mut registry = load_registry();
     upsert_session(&mut registry, SessionRecord {
         id: session_id.clone(),
@@ -525,7 +560,7 @@ fn handle_scan(cmd: ScanCmd) {
         target: cmd.target.clone().unwrap_or_default(),
         primary: cmd.primary.clone(),
         status: "in_progress".to_string(),
-        secondaries: vec![],
+        secondaries: registry_secondaries,
     });
     save_registry(&registry);
 
@@ -598,6 +633,7 @@ fn handle_build(cmd: BuildCmd) {
             files_folded_in: folded,
             files_skipped: skipped.len(),
             skipped: skipped.clone(),
+            unique_files: vec![], // scan results already persisted; not needed post-build
         });
     }
 
@@ -631,6 +667,53 @@ fn handle_finalize(cmd: FinalizeCmd) {
     });
 }
 
+fn handle_load(cmd: LoadCmd) {
+    let registry = load_registry();
+
+    // Find the most recent in_progress or complete session matching
+    // this primary + secondary set.
+    let mut secondaries_sorted = cmd.secondaries.clone();
+    secondaries_sorted.sort();
+
+    let session = registry.sessions.iter()
+        .filter(|s| {
+            if s.primary != cmd.primary { return false; }
+            if s.status == "finalized" { return false; }
+            // Secondary paths must match exactly.
+            let mut reg_paths: Vec<String> =
+                s.secondaries.iter().map(|r| r.path.clone()).collect();
+            reg_paths.sort();
+            reg_paths == secondaries_sorted
+        })
+        // Take the most recently created session.
+        .max_by(|a, b| a.created.cmp(&b.created));
+
+    match session {
+        None => {
+            emit(&ConsolidateLoadNotFound {
+                event_type: "consolidate_load_not_found",
+            });
+        }
+        Some(s) => {
+            let secondaries: Vec<SecondaryResult> = s.secondaries.iter().map(|r| {
+                SecondaryResult {
+                    path: r.path.clone(),
+                    unique_files: r.unique_files.iter().map(|f| UniqueFile {
+                        relative_path: f.relative_path.clone(),
+                        size_bytes: f.size_bytes,
+                    }).collect(),
+                }
+            }).collect();
+            emit(&ConsolidateScanComplete {
+                event_type: "consolidate_scan_complete",
+                session_id: s.id.clone(),
+                primary: s.primary.clone(),
+                secondaries,
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stdin dispatch — called from main.rs
 // ---------------------------------------------------------------------------
@@ -645,6 +728,7 @@ pub fn run_from_stdin() {
         Ok(ConsolidateCommand::ConsolidateScan(cmd)) => handle_scan(cmd),
         Ok(ConsolidateCommand::ConsolidateBuild(cmd)) => handle_build(cmd),
         Ok(ConsolidateCommand::ConsolidateFinalize(cmd)) => handle_finalize(cmd),
+        Ok(ConsolidateCommand::ConsolidateLoad(cmd)) => handle_load(cmd),
         Err(e) => emit_error(&format!("Failed to parse consolidate command: {}", e)),
     }
 }

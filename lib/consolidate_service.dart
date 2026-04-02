@@ -51,6 +51,24 @@ class ConsolidateService {
   }
 
   // ---------------------------------------------------------------------------
+  // Load (resume)
+  // ---------------------------------------------------------------------------
+
+  /// Check the registry for an existing scan matching [primary] + [secondaries].
+  /// Emits [ConsolidateScanComplete] if found, [ConsolidateLoadNotFound] if not.
+  Stream<ConsolidateEvent> load({
+    required String primary,
+    required List<String> secondaries,
+  }) {
+    final cmd = {
+      'command': 'consolidate_load',
+      'primary': primary,
+      'secondaries': secondaries,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
   // Finalize
   // ---------------------------------------------------------------------------
 
