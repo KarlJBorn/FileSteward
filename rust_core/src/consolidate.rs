@@ -303,7 +303,40 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
-/// Walk a directory tree and return all file paths.
+/// Directory names that are always skipped during walking.
+const SKIP_DIRS: &[&str] = &[
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    ".DocumentRevisions-V100",
+    ".PKInstallSandboxManager",
+    "__MACOSX",
+    ".git",
+    ".svn",
+    "node_modules",
+];
+
+/// File names that are always skipped.
+const SKIP_FILES: &[&str] = &[
+    ".DS_Store",
+    ".localized",
+    "Thumbs.db",
+    "desktop.ini",
+    ".dropbox",
+    ".dropbox.cache",
+];
+
+fn should_skip_dir(name: &str) -> bool {
+    // Skip hidden dirs (starting with '.') and known system dirs.
+    name.starts_with('.') || SKIP_DIRS.contains(&name)
+}
+
+fn should_skip_file(name: &str) -> bool {
+    SKIP_FILES.contains(&name)
+}
+
+/// Walk a directory tree and return all non-system file paths.
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     walk_files_dir(root, &mut paths);
@@ -320,15 +353,21 @@ fn walk_files_dir(current: &Path, out: &mut Vec<PathBuf>) {
             Ok(e) => e,
             Err(_) => continue,
         };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         let path = entry.path();
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
         if metadata.is_dir() {
-            walk_files_dir(&path, out);
+            if !should_skip_dir(&name_str) {
+                walk_files_dir(&path, out);
+            }
         } else if metadata.is_file() {
-            out.push(path);
+            if !should_skip_file(&name_str) {
+                out.push(path);
+            }
         }
     }
 }
