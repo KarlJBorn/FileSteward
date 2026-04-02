@@ -66,12 +66,6 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   final TextEditingController _targetNameController = TextEditingController();
   bool _targetManuallySet = false; // true once user has edited either field
 
-  @override
-  void dispose() {
-    _targetNameController.dispose();
-    super.dispose();
-  }
-
   String? get _resolvedTargetPath {
     final parent = _targetParentPath;
     final name = _targetNameController.text.trim();
@@ -112,6 +106,43 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 
   // Error
   String? _errorMessage;
+
+  // Timer
+  DateTime? _scanStartTime;
+  Duration _scanElapsed = Duration.zero;
+  Timer? _elapsedTimer;
+
+  void _startElapsedTimer() {
+    _scanStartTime = DateTime.now();
+    _scanElapsed = Duration.zero;
+    _elapsedTimer?.cancel();
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_scanStartTime != null) {
+        setState(() {
+          _scanElapsed = DateTime.now().difference(_scanStartTime!);
+        });
+      }
+    });
+  }
+
+  void _stopElapsedTimer() {
+    _elapsedTimer?.cancel();
+    _elapsedTimer = null;
+  }
+
+  String _formatElapsed(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return h > 0 ? '$h:$m:$s' : '$m:$s';
+  }
+
+  @override
+  void dispose() {
+    _elapsedTimer?.cancel();
+    _targetNameController.dispose();
+    super.dispose();
+  }
 
   // ---------------------------------------------------------------------------
   // Source selection helpers
@@ -207,6 +238,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       for (final s in _secondaryPaths)
         s: _SourceScanState(status: _SourceScanStatus.waiting),
     };
+    _startElapsedTimer();
     setState(() {
       _phase = _Phase.scanning;
       _scanProgressSource = _primaryPath!;
@@ -243,6 +275,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
           sessionId = sid;
           diffs = secs;
         case ConsolidateError(:final message):
+          _stopElapsedTimer();
           setState(() {
             _errorMessage = message;
             _phase = _Phase.sourceSelection;
@@ -254,6 +287,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     }
 
     if (sessionId == null) {
+      _stopElapsedTimer();
       setState(() {
         _errorMessage = 'Scan did not complete — no result received.';
         _phase = _Phase.sourceSelection;
@@ -269,6 +303,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       }
     }
 
+    _stopElapsedTimer();
     for (final s in _scanStates.values) {
       s.status = _SourceScanStatus.done;
     }
@@ -539,10 +574,25 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Scanning sources…',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-              textAlign: TextAlign.center,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                const Text(
+                  'Scanning sources…',
+                  style: TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  _formatElapsed(_scanElapsed),
+                  style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w300,
+                      color: Colors.grey[600],
+                      fontFeatures: const [FontFeature.tabularFigures()]),
+                ),
+              ],
             ),
             const SizedBox(height: 20),
             LinearProgressIndicator(value: overallProgress),
