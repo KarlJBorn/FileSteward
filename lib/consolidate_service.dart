@@ -129,8 +129,13 @@ class ConsolidateService {
     if (rustBinaryResolver != null) return rustBinaryResolver!();
 
     final override = Platform.environment['FILESTEWARD_RUST_BINARY'];
+    // When running as a macOS .app bundle the executable lives at
+    // Contents/MacOS/FileSteward; we also ship rust_core there.
+    final bundleSibling =
+        '${File(Platform.resolvedExecutable).parent.path}/rust_core';
     final candidates = <String>[
       if (override != null && override.isNotEmpty) override,
+      bundleSibling,
       'rust_core/target/debug/rust_core',
       '../rust_core/target/debug/rust_core',
       '../../rust_core/target/debug/rust_core',
