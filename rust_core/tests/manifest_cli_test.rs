@@ -417,3 +417,137 @@ fn consolidate_result_has_required_fields() {
         assert!(files[0]["size_bytes"].is_number(), "size_bytes missing");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Registry tests (#96)
+// ---------------------------------------------------------------------------
+
+/// Run a consolidate_scan with an explicit session_id and an isolated registry.
+/// Returns (scan result Value, registry path).
+fn run_consolidate_with_session(
+    primary: &str,
+    secondaries: &[&str],
+    session_id: &str,
+    target: &str,
+    registry_path: &str,
+) -> Value {
+    let cmd = serde_json::json!({
+        "command": "consolidate_scan",
+        "primary": primary,
+        "secondaries": secondaries,
+        "session_id": session_id,
+        "target": target,
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rust_core"))
+        .arg("consolidate")
+        .env("FILESTEWARD_REGISTRY_PATH", registry_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("should spawn rust_core consolidate");
+
+    child.stdin.take().unwrap()
+        .write_all(cmd.to_string().as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().expect("should complete");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v["type"] == "consolidate_scan_complete" {
+                return v;
+            }
+        }
+    }
+    panic!("no consolidate_scan_complete in output:\n{}", stdout);
+}
+
+fn run_consolidate_finalize(session_id: &str, registry_path: &str) -> Value {
+    let cmd = serde_json::json!({
+        "command": "consolidate_finalize",
+        "session_id": session_id,
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rust_core"))
+        .arg("consolidate")
+        .env("FILESTEWARD_REGISTRY_PATH", registry_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("should spawn rust_core consolidate");
+
+    child.stdin.take().unwrap()
+        .write_all(cmd.to_string().as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().expect("should complete");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v["type"] == "consolidate_finalize_complete" {
+                return v;
+            }
+        }
+    }
+    panic!("no consolidate_finalize_complete in output:\n{}", stdout);
+}
+
+fn read_registry_at(path: &str) -> Value {
+    let content = std::fs::read_to_string(path)
+        .expect("sessions.json should exist after a scan");
+    serde_json::from_str(&content).expect("sessions.json should be valid JSON")
+}
+
+#[test]
+fn registry_scan_creates_session() {
+    let registry = std::env::temp_dir().join("fs_test_registry_scan_creates.json");
+    let registry_str = registry.to_str().unwrap();
+    let session_id = "test-registry-scan-creates";
+    let primary = consolidate_fixture("primary");
+    let sec_a = consolidate_fixture("secondary_a");
+
+    run_consolidate_with_session(
+        primary.to_str().unwrap(),
+        &[sec_a.to_str().unwrap()],
+        session_id,
+        "/tmp/test_consolidated",
+        registry_str,
+    );
+
+    let reg = read_registry_at(registry_str);
+    let sessions = reg["sessions"].as_array().expect("sessions array");
+    let session = sessions.iter().find(|s| s["id"] == session_id)
+        .expect("session should be in registry");
+
+    assert_eq!(session["status"], "in_progress");
+    assert_eq!(session["primary"], primary.to_str().unwrap());
+}
+
+#[test]
+fn registry_finalize_updates_status() {
+    let registry = std::env::temp_dir().join("fs_test_registry_finalize.json");
+    let registry_str = registry.to_str().unwrap();
+    let session_id = "test-registry-finalize";
+    let primary = consolidate_fixture("primary");
+    let sec_a = consolidate_fixture("secondary_a");
+
+    run_consolidate_with_session(
+        primary.to_str().unwrap(),
+        &[sec_a.to_str().unwrap()],
+        session_id,
+        "/tmp/test_consolidated_finalize",
+        registry_str,
+    );
+
+    let result = run_consolidate_finalize(session_id, registry_str);
+    assert_eq!(result["type"], "consolidate_finalize_complete");
+    assert_eq!(result["session_id"], session_id);
+
+    let reg = read_registry_at(registry_str);
+    let sessions = reg["sessions"].as_array().expect("sessions array");
+    let session = sessions.iter().find(|s| s["id"] == session_id)
+        .expect("session should be in registry");
+
+    assert_eq!(session["status"], "finalized");
+}
