@@ -334,23 +334,47 @@ fn walk_files_dir(current: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Build a hash set of all SHA-256 digests in [root], hashing in parallel.
-/// Returns (hash_set, file_count).
-fn collect_hashes(root: &Path) -> (HashSet<String>, usize) {
+/// Returns (hash_set, size_set, file_count).
+fn collect_hashes(root: &Path) -> (HashSet<String>, HashSet<u64>, usize) {
     let files = walk_files(root);
     let count = files.len();
-    let hashes = files
+    let (hashes, sizes): (HashSet<String>, HashSet<u64>) = files
         .par_iter()
-        .filter_map(|p| hash_file(p))
-        .collect();
-    (hashes, count)
+        .map(|p| {
+            let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let hash = hash_file(p);
+            (hash, size)
+        })
+        .fold(
+            || (HashSet::new(), HashSet::new()),
+            |(mut hs, mut ss), (hash, size)| {
+                if let Some(h) = hash {
+                    hs.insert(h);
+                }
+                ss.insert(size);
+                (hs, ss)
+            },
+        )
+        .reduce(
+            || (HashSet::new(), HashSet::new()),
+            |(mut hs1, mut ss1), (hs2, ss2)| {
+                hs1.extend(hs2);
+                ss1.extend(ss2);
+                (hs1, ss1)
+            },
+        );
+    (hashes, sizes, count)
 }
 
 /// Diff [secondary_root] against [primary_hashes], returning files whose
 /// content is not present in the primary. Hashing runs in parallel;
 /// progress events are emitted on the calling thread every 500 files.
+/// Files whose size is not present in [primary_sizes] are immediately
+/// classified as unique without hashing.
 fn diff_secondary(
     secondary_root: &Path,
     primary_hashes: &HashSet<String>,
+    primary_sizes: &HashSet<u64>,
     source_label: &str,
 ) -> Vec<UniqueFile> {
     let files = walk_files(secondary_root);
@@ -378,17 +402,24 @@ fn diff_secondary(
                 });
             }
             let metadata = fs::metadata(path).ok()?;
-            let hash = hash_file(path)?;
-            if primary_hashes.contains(&hash) {
-                return None;
-            }
+            let size = metadata.len();
             let relative_path = path
                 .strip_prefix(secondary_root)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
+            // Size pre-filter: if no primary file has this size, no primary
+            // file can have matching content — skip hashing entirely.
+            if !primary_sizes.contains(&size) {
+                return Some(UniqueFile { relative_path, size_bytes: size });
+            }
+            // Size matches at least one primary file — must hash to be sure.
+            let hash = hash_file(path)?;
+            if primary_hashes.contains(&hash) {
+                return None;
+            }
             Some(UniqueFile {
                 relative_path,
-                size_bytes: metadata.len(),
+                size_bytes: size,
             })
         })
         .collect();
@@ -430,7 +461,7 @@ fn handle_scan(cmd: ScanCmd) {
         source: cmd.primary.clone(),
         files_scanned: 0,
     });
-    let (primary_hashes, primary_count) = collect_hashes(&primary_path);
+    let (primary_hashes, primary_sizes, primary_count) = collect_hashes(&primary_path);
     emit(&ConsolidateProgressEvent {
         event_type: "consolidate_progress",
         source: cmd.primary.clone(),
@@ -440,7 +471,7 @@ fn handle_scan(cmd: ScanCmd) {
     let mut secondary_results = Vec::new();
     for sec_path_str in &cmd.secondaries {
         let sec_path = PathBuf::from(sec_path_str);
-        let unique_files = diff_secondary(&sec_path, &primary_hashes, sec_path_str);
+        let unique_files = diff_secondary(&sec_path, &primary_hashes, &primary_sizes, sec_path_str);
         secondary_results.push(SecondaryResult {
             path: sec_path_str.clone(),
             unique_files,
