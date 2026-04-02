@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -323,6 +324,37 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     final sessionId = _sessionId!;
 
     final target = _resolvedTargetPath!;
+
+    // Warn if target already exists — files at matching paths will be overwritten.
+    if (Directory(target).existsSync()) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Output folder already exists'),
+          content: Text(
+            '"${target.split('/').last}" already exists at the chosen location.\n\n'
+            'Any files with matching paths will be overwritten. '
+            'Files already in the folder that are not being folded in will be left untouched.\n\n'
+            'Continue?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange[700],
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Overwrite'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
 
     final kept = _reviewItems.where((item) => item.keep).toList();
 
