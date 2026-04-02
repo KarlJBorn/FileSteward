@@ -3,12 +3,12 @@ import 'dart:async';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import 'app_version.dart';
 import 'consolidate_screen.dart';
 import 'manifest_models.dart';
 import 'manifest_service.dart';
 import 'rationalize_screen.dart';
 import 'scan_events.dart';
-import 'splash_screen.dart';
 
 void main() {
   runApp(const FileStewardApp());
@@ -22,7 +22,7 @@ class FileStewardApp extends StatelessWidget {
     return MaterialApp(
       title: 'FileSteward',
       debugShowCheckedModeBanner: false,
-      home: const SplashScreen(nextPage: FileStewardHomePage()),
+      home: const FileStewardHomePage(),
     );
   }
 }
@@ -629,7 +629,18 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         : 'No folder selected';
 
     return Scaffold(
-      appBar: AppBar(title: const Text('FileSteward')),
+      appBar: AppBar(
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('FileSteward'),
+            Text(
+              'v$kAppVersion',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.normal),
+            ),
+          ],
+        ),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(24, 24, 24, 140),
         child: Column(

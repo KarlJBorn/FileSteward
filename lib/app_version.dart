@@ -2,4 +2,4 @@
 ///
 /// Keep in sync with the `version` field in pubspec.yaml.
 /// Format: MAJOR.MINOR.PATCH (no build number).
-const String kAppVersion = '0.5.3';
+const String kAppVersion = '0.5.4';
