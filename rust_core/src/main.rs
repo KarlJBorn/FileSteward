@@ -1,3 +1,4 @@
+mod consolidate;
 mod convention;
 mod rationalize;
 
@@ -341,6 +342,12 @@ fn main() {
             std::process::exit(1);
         }
         rationalize::run(&args[2]);
+        return;
+    }
+
+    // Subcommand dispatch — consolidate mode (Iteration 5)
+    if args[1] == "consolidate" {
+        consolidate::run_from_stdin();
         return;
     }
 
