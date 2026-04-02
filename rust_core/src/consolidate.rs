@@ -28,12 +28,14 @@
 /// { "command": "consolidate_finalize", "session_id": "2026-04-01T15-00-00" }
 /// ```
 use hex;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -301,13 +303,14 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
-fn collect_hashes(root: &Path) -> HashSet<String> {
-    let mut hashes = HashSet::new();
-    collect_hashes_dir(root, root, &mut hashes);
-    hashes
+/// Walk a directory tree and return all file paths.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    walk_files_dir(root, &mut paths);
+    paths
 }
 
-fn collect_hashes_dir(root: &Path, current: &Path, hashes: &mut HashSet<String>) {
+fn walk_files_dir(current: &Path, out: &mut Vec<PathBuf>) {
     let read_dir = match fs::read_dir(current) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -323,77 +326,73 @@ fn collect_hashes_dir(root: &Path, current: &Path, hashes: &mut HashSet<String>)
             Err(_) => continue,
         };
         if metadata.is_dir() {
-            collect_hashes_dir(root, &path, hashes);
+            walk_files_dir(&path, out);
         } else if metadata.is_file() {
-            if let Some(hash) = hash_file(&path) {
-                hashes.insert(hash);
-            }
+            out.push(path);
         }
     }
 }
 
-fn diff_secondary(secondary_root: &Path, primary_hashes: &HashSet<String>) -> Vec<UniqueFile> {
-    let mut unique = Vec::new();
-    let mut files_scanned = 0usize;
-    diff_secondary_dir(
-        secondary_root,
-        secondary_root,
-        primary_hashes,
-        &mut unique,
-        &mut files_scanned,
-        &secondary_root.to_string_lossy().to_string(),
-    );
-    unique.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    unique
+/// Build a hash set of all SHA-256 digests in [root], hashing in parallel.
+fn collect_hashes(root: &Path) -> HashSet<String> {
+    let files = walk_files(root);
+    files
+        .par_iter()
+        .filter_map(|p| hash_file(p))
+        .collect()
 }
 
-fn diff_secondary_dir(
-    root: &Path,
-    current: &Path,
+/// Diff [secondary_root] against [primary_hashes], returning files whose
+/// content is not present in the primary. Hashing runs in parallel;
+/// progress events are emitted on the calling thread every 500 files.
+fn diff_secondary(
+    secondary_root: &Path,
     primary_hashes: &HashSet<String>,
-    unique: &mut Vec<UniqueFile>,
-    files_scanned: &mut usize,
     source_label: &str,
-) {
-    let read_dir = match fs::read_dir(current) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry_result in read_dir {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if metadata.is_dir() {
-            diff_secondary_dir(root, &path, primary_hashes, unique, files_scanned, source_label);
-        } else if metadata.is_file() {
-            *files_scanned += 1;
-            if *files_scanned % 50 == 0 {
+) -> Vec<UniqueFile> {
+    let files = walk_files(secondary_root);
+    let total = files.len();
+    let counter = AtomicUsize::new(0);
+
+    // Emit a starting progress event so the UI sees movement immediately.
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: source_label.to_string(),
+        files_scanned: 0,
+    });
+
+    let unique: Vec<UniqueFile> = files
+        .par_iter()
+        .filter_map(|path| {
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            // Emit progress on rough multiples of 5% of total (min 50 files).
+            let interval = (total / 20).max(50);
+            if n % interval == 0 {
                 emit(&ConsolidateProgressEvent {
                     event_type: "consolidate_progress",
                     source: source_label.to_string(),
-                    files_scanned: *files_scanned,
+                    files_scanned: n,
                 });
             }
-            if let Some(hash) = hash_file(&path) {
-                if !primary_hashes.contains(&hash) {
-                    let relative_path = path
-                        .strip_prefix(root)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    unique.push(UniqueFile {
-                        relative_path,
-                        size_bytes: metadata.len(),
-                    });
-                }
+            let metadata = fs::metadata(path).ok()?;
+            let hash = hash_file(path)?;
+            if primary_hashes.contains(&hash) {
+                return None;
             }
-        }
-    }
+            let relative_path = path
+                .strip_prefix(secondary_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            Some(UniqueFile {
+                relative_path,
+                size_bytes: metadata.len(),
+            })
+        })
+        .collect();
+
+    let mut sorted = unique;
+    sorted.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    sorted
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +432,7 @@ fn handle_scan(cmd: ScanCmd) {
     let mut secondary_results = Vec::new();
     for sec_path_str in &cmd.secondaries {
         let sec_path = PathBuf::from(sec_path_str);
-        let unique_files = diff_secondary(&sec_path, &primary_hashes);
+        let unique_files = diff_secondary(&sec_path, &primary_hashes, sec_path_str);
         secondary_results.push(SecondaryResult {
             path: sec_path_str.clone(),
             unique_files,
