@@ -365,6 +365,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
             ))
         .toList();
 
+    _startElapsedTimer();
     setState(() {
       _phase = _Phase.building;
       _buildFilesTotal = kept.length;
@@ -388,6 +389,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
         case ConsolidateBuildComplete(filesCopied: final n):
           filesCopied = n;
         case ConsolidateError(:final message):
+          _stopElapsedTimer();
           setState(() {
             _errorMessage = message;
             _phase = _Phase.review;
@@ -398,6 +400,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       }
     }
 
+    _stopElapsedTimer();
     setState(() {
       _filesCopied = filesCopied;
       _phase = _Phase.result;
@@ -740,16 +743,32 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.symmetric(horizontal: 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            LinearProgressIndicator(value: progress),
-            const SizedBox(height: 16),
-            const Text(
-              'Building output…',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                const Text(
+                  'Building output…',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  _formatElapsed(_scanElapsed),
+                  style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w300,
+                      color: Colors.grey[600],
+                      fontFeatures: const [FontFeature.tabularFigures()]),
+                ),
+              ],
             ),
+            const SizedBox(height: 16),
+            LinearProgressIndicator(value: progress),
             const SizedBox(height: 8),
             Text(
               _buildFilesTotal > 0
