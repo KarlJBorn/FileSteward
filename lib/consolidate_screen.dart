@@ -61,6 +61,37 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   String? _primaryPath;
   final List<String> _secondaryPaths = [];
 
+  // Target
+  String? _targetParentPath;
+  final TextEditingController _targetNameController = TextEditingController();
+  bool _targetManuallySet = false; // true once user has edited either field
+
+  @override
+  void dispose() {
+    _targetNameController.dispose();
+    super.dispose();
+  }
+
+  String? get _resolvedTargetPath {
+    final parent = _targetParentPath;
+    final name = _targetNameController.text.trim();
+    if (parent == null || name.isEmpty) return null;
+    return '$parent/$name';
+  }
+
+  void _autoPopulateTarget(String primaryPath) {
+    if (_targetManuallySet) return;
+    final parts = primaryPath.split('/');
+    final parent = parts.length > 1
+        ? parts.sublist(0, parts.length - 1).join('/')
+        : '/';
+    final name = '${parts.last}_consolidated';
+    setState(() {
+      _targetParentPath = parent;
+      _targetNameController.text = name;
+    });
+  }
+
   // Scan
   String _scanProgressSource = '';
   List<String> _scanSources = []; // primary + secondaries in order
@@ -117,6 +148,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     setState(() {
       _primaryPath = path;
     });
+    _autoPopulateTarget(path);
   }
 
   Future<void> _addSecondary() async {
@@ -130,6 +162,15 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     if (path == _primaryPath || _secondaryPaths.contains(path)) return;
     setState(() {
       _secondaryPaths.add(path);
+    });
+  }
+
+  Future<void> _pickTargetParent() async {
+    final path = await getDirectoryPath();
+    if (path == null || path.isEmpty) return;
+    setState(() {
+      _targetParentPath = path;
+      _targetManuallySet = true;
     });
   }
 
@@ -151,7 +192,9 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   }
 
   bool get _canScan =>
-      _primaryPath != null && _secondaryPaths.isNotEmpty;
+      _primaryPath != null &&
+      _secondaryPaths.isNotEmpty &&
+      _resolvedTargetPath != null;
 
   // ---------------------------------------------------------------------------
   // Scan
@@ -244,9 +287,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   Future<void> _startBuild() async {
     final sessionId = _sessionId!;
 
-    // Derive target path: <primary>_consolidated
-    final primary = _primaryPath!;
-    final target = '${primary}_consolidated';
+    final target = _resolvedTargetPath!;
 
     final kept = _reviewItems.where((item) => item.keep).toList();
 
@@ -418,6 +459,50 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                     icon: const Icon(Icons.add),
                     label: const Text('Add Secondary Folder…'),
                   ),
+                const SizedBox(height: 24),
+                _SectionHeader(
+                  title: 'Output Directory',
+                  subtitle: 'Where the consolidated folder will be created.',
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _pickTargetParent,
+                        icon: const Icon(Icons.folder_open, size: 18),
+                        label: Text(
+                          _targetParentPath != null
+                              ? _leafName(_targetParentPath!)
+                              : 'Choose Location…',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: _targetNameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Folder name',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onChanged: (_) => setState(() {
+                          _targetManuallySet = true;
+                        }),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_resolvedTargetPath != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _resolvedTargetPath!,
+                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ],
             ),
           ),
