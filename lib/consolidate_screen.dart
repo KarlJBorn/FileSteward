@@ -56,6 +56,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // Scan
   String _scanProgressSource = '';
   int _scanProgressCount = 0;
+  List<String> _scanSources = []; // primary + secondaries in order
   String? _sessionId;
   List<SecondaryDiff> _diffs = [];
 
@@ -113,6 +114,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       _phase = _Phase.scanning;
       _scanProgressSource = _primaryPath!;
       _scanProgressCount = 0;
+      _scanSources = [_primaryPath!, ..._secondaryPaths];
       _errorMessage = null;
       _diffs = [];
       _sessionId = null;
@@ -377,29 +379,47 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildScanning() {
+    final total = _scanSources.length;
+    final currentIndex = _scanSources.indexOf(_scanProgressSource);
+    // Progress = completed sources + fraction of current (indeterminate within source)
+    final sourceProgress = total > 0
+        ? (currentIndex < 0 ? 0.0 : currentIndex / total)
+        : null;
+
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.symmetric(horizontal: 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 24),
-            const Text(
-              'Scanning sources…',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
             Text(
-              _shortPath(_scanProgressSource),
-              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+              'Scanning sources…',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
               textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            LinearProgressIndicator(value: sourceProgress),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  _leafName(_scanProgressSource),
+                  style: TextStyle(fontSize: 13, color: Colors.grey[700]),
+                ),
+                if (total > 1)
+                  Text(
+                    'Source ${currentIndex < 0 ? 1 : currentIndex + 1} of $total',
+                    style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+                  ),
+              ],
             ),
             if (_scanProgressCount > 0) ...[
               const SizedBox(height: 4),
               Text(
                 '$_scanProgressCount files scanned',
-                style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
               ),
             ],
           ],
