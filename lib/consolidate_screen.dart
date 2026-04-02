@@ -18,6 +18,14 @@ enum _Phase {
   result,
 }
 
+enum _SourceScanStatus { waiting, scanning, done }
+
+class _SourceScanState {
+  _SourceScanStatus status;
+  int filesScanned;
+  _SourceScanState({required this.status, this.filesScanned = 0});
+}
+
 // ---------------------------------------------------------------------------
 // Review state: Keep (default) or Skip per unique file
 // ---------------------------------------------------------------------------
@@ -55,8 +63,8 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 
   // Scan
   String _scanProgressSource = '';
-  int _scanProgressCount = 0;
   List<String> _scanSources = []; // primary + secondaries in order
+  Map<String, _SourceScanState> _scanStates = {};
   String? _sessionId;
   List<SecondaryDiff> _diffs = [];
 
@@ -110,11 +118,17 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _startScan() async {
+    final sources = [_primaryPath!, ..._secondaryPaths];
+    final initialStates = <String, _SourceScanState>{
+      _primaryPath!: _SourceScanState(status: _SourceScanStatus.scanning),
+      for (final s in _secondaryPaths)
+        s: _SourceScanState(status: _SourceScanStatus.waiting),
+    };
     setState(() {
       _phase = _Phase.scanning;
       _scanProgressSource = _primaryPath!;
-      _scanProgressCount = 0;
-      _scanSources = [_primaryPath!, ..._secondaryPaths];
+      _scanSources = sources;
+      _scanStates = initialStates;
       _errorMessage = null;
       _diffs = [];
       _sessionId = null;
@@ -130,8 +144,14 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       switch (event) {
         case ConsolidateProgress(:final source, :final filesScanned):
           setState(() {
+            // If source changed, mark the previous source as done.
+            if (source != _scanProgressSource) {
+              _scanStates[_scanProgressSource]?.status =
+                  _SourceScanStatus.done;
+              _scanStates[source]?.status = _SourceScanStatus.scanning;
+            }
             _scanProgressSource = source;
-            _scanProgressCount = filesScanned;
+            _scanStates[source]?.filesScanned = filesScanned;
           });
         case ConsolidateScanComplete(
             sessionId: final sid,
@@ -166,6 +186,9 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       }
     }
 
+    for (final s in _scanStates.values) {
+      s.status = _SourceScanStatus.done;
+    }
     setState(() {
       _sessionId = sessionId;
       _diffs = diffs;
@@ -379,12 +402,10 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildScanning() {
+    final doneCount =
+        _scanStates.values.where((s) => s.status == _SourceScanStatus.done).length;
     final total = _scanSources.length;
-    final currentIndex = _scanSources.indexOf(_scanProgressSource);
-    // Progress = completed sources + fraction of current (indeterminate within source)
-    final sourceProgress = total > 0
-        ? (currentIndex < 0 ? 0.0 : currentIndex / total)
-        : null;
+    final overallProgress = total > 0 ? doneCount / total : null;
 
     return Center(
       child: Padding(
@@ -393,34 +414,22 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
+            const Text(
               'Scanning sources…',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
-            LinearProgressIndicator(value: sourceProgress),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  _leafName(_scanProgressSource),
-                  style: TextStyle(fontSize: 13, color: Colors.grey[700]),
-                ),
-                if (total > 1)
-                  Text(
-                    'Source ${currentIndex < 0 ? 1 : currentIndex + 1} of $total',
-                    style: TextStyle(fontSize: 13, color: Colors.grey[500]),
-                  ),
-              ],
-            ),
-            if (_scanProgressCount > 0) ...[
-              const SizedBox(height: 4),
-              Text(
-                '$_scanProgressCount files scanned',
-                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            LinearProgressIndicator(value: overallProgress),
+            const SizedBox(height: 24),
+            for (int i = 0; i < _scanSources.length; i++) ...[
+              _ScanSourceRow(
+                label: i == 0 ? 'Primary' : 'Secondary $i',
+                name: _leafName(_scanSources[i]),
+                state: _scanStates[_scanSources[i]] ??
+                    _SourceScanState(status: _SourceScanStatus.waiting),
               ),
+              if (i < _scanSources.length - 1) const SizedBox(height: 8),
             ],
           ],
         ),
@@ -626,6 +635,80 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 // ---------------------------------------------------------------------------
 // Small reusable widgets
 // ---------------------------------------------------------------------------
+
+class _ScanSourceRow extends StatelessWidget {
+  final String label;
+  final String name;
+  final _SourceScanState state;
+
+  const _ScanSourceRow({
+    required this.label,
+    required this.name,
+    required this.state,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDone = state.status == _SourceScanStatus.done;
+    final isScanning = state.status == _SourceScanStatus.scanning;
+    final isWaiting = state.status == _SourceScanStatus.waiting;
+
+    final statusIcon = isDone
+        ? Icon(Icons.check_circle, size: 16, color: Colors.green[700])
+        : isScanning
+            ? SizedBox(
+                width: 16,
+                height: 16,
+                child: LinearProgressIndicator(
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              )
+            : Icon(Icons.radio_button_unchecked,
+                size: 16, color: Colors.grey[400]);
+
+    final fileLabel = isDone
+        ? (state.filesScanned > 0 ? '${state.filesScanned} files' : 'done')
+        : isScanning
+            ? state.filesScanned > 0
+                ? '${state.filesScanned} files…'
+                : 'hashing…'
+            : 'waiting';
+
+    return Row(
+      children: [
+        statusIcon,
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '$label: $name',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: isWaiting ? Colors.grey[400] : null,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+              Text(
+                fileLabel,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isDone
+                      ? Colors.green[700]
+                      : isScanning
+                          ? Colors.blue[700]
+                          : Colors.grey[400],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class _SectionHeader extends StatelessWidget {
   final String title;

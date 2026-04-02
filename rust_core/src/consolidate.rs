@@ -334,12 +334,15 @@ fn walk_files_dir(current: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Build a hash set of all SHA-256 digests in [root], hashing in parallel.
-fn collect_hashes(root: &Path) -> HashSet<String> {
+/// Returns (hash_set, file_count).
+fn collect_hashes(root: &Path) -> (HashSet<String>, usize) {
     let files = walk_files(root);
-    files
+    let count = files.len();
+    let hashes = files
         .par_iter()
         .filter_map(|p| hash_file(p))
-        .collect()
+        .collect();
+    (hashes, count)
 }
 
 /// Diff [secondary_root] against [primary_hashes], returning files whose
@@ -427,7 +430,12 @@ fn handle_scan(cmd: ScanCmd) {
         source: cmd.primary.clone(),
         files_scanned: 0,
     });
-    let primary_hashes = collect_hashes(&primary_path);
+    let (primary_hashes, primary_count) = collect_hashes(&primary_path);
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: cmd.primary.clone(),
+        files_scanned: primary_count,
+    });
 
     let mut secondary_results = Vec::new();
     for sec_path_str in &cmd.secondaries {
