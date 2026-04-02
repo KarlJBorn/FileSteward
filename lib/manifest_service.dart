@@ -232,8 +232,13 @@ class ManifestService {
 
     final String? overridePath =
         Platform.environment['FILESTEWARD_RUST_BINARY'];
+    // When running as a macOS .app bundle the executable lives at
+    // Contents/MacOS/FileSteward; we also ship rust_core there.
+    final String bundleSibling =
+        '${File(Platform.resolvedExecutable).parent.path}/rust_core';
     final List<String> candidatePaths = <String>[
       if (overridePath != null && overridePath.isNotEmpty) overridePath,
+      bundleSibling,
       'rust_core/target/debug/rust_core',
       '../rust_core/target/debug/rust_core',
       '../../rust_core/target/debug/rust_core',

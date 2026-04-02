@@ -3,11 +3,12 @@ import 'dart:async';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import 'app_version.dart';
+import 'consolidate_screen.dart';
 import 'manifest_models.dart';
 import 'manifest_service.dart';
 import 'rationalize_screen.dart';
 import 'scan_events.dart';
-import 'splash_screen.dart';
 
 void main() {
   runApp(const FileStewardApp());
@@ -21,7 +22,7 @@ class FileStewardApp extends StatelessWidget {
     return MaterialApp(
       title: 'FileSteward',
       debugShowCheckedModeBanner: false,
-      home: const SplashScreen(nextPage: FileStewardHomePage()),
+      home: const FileStewardHomePage(),
     );
   }
 }
@@ -628,7 +629,18 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
         : 'No folder selected';
 
     return Scaffold(
-      appBar: AppBar(title: const Text('FileSteward')),
+      appBar: AppBar(
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('FileSteward'),
+            Text(
+              'v$kAppVersion',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.normal),
+            ),
+          ],
+        ),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(24, 24, 24, 140),
         child: Column(
@@ -693,20 +705,44 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               ],
             ),
             const SizedBox(height: 8),
-            ElevatedButton.icon(
-              onPressed: (_isInventoryRunning || _isRunning)
-                  ? null
-                  : () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const RationalizeScreen(),
-                        ),
-                      ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0E70C0),
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.auto_fix_high),
-              label: const Text('Rationalize Folder…'),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: (_isInventoryRunning || _isRunning)
+                        ? null
+                        : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const RationalizeScreen(),
+                              ),
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0E70C0),
+                      foregroundColor: Colors.white,
+                    ),
+                    icon: const Icon(Icons.auto_fix_high),
+                    label: const Text('Rationalize…'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: (_isInventoryRunning || _isRunning)
+                        ? null
+                        : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const ConsolidateScreen(),
+                              ),
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal[700],
+                      foregroundColor: Colors.white,
+                    ),
+                    icon: const Icon(Icons.merge),
+                    label: const Text('Consolidate…'),
+                  ),
+                ),
+              ],
             ),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,

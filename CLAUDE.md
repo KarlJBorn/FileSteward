@@ -107,22 +107,68 @@ It is **not** a bulk-delete tool; it is an analysis and decision-support tool. E
 - Collapsible/expandable folder nodes in both tree panels (depth ≥ 2 starts collapsed)
 - `docs/product-definition.md` updated to reflect Maintain-first approach and two-app vision
 
-### Iteration 5 — Consolidate App (first version)
-**Goal:** FileSteward Consolidate v1. Multiple source directories → one canonical output.
+### Iteration 5 — Consolidate v1 (current, in progress — PR #104)
+**Goal:** First working Consolidate flow. Primary/secondary model as a stepping stone.
 
-- Multi-folder selection (#38)
-- Engine: walk all sources, fingerprint files, identify unique content not in primary
-- User reviews: which unique files to fold in
-- Engine builds output directory (no swap)
-- Cleaning rules applied to secondary sources before folding (skip empty, reserved, system folders)
-- Rust core restructured as shared library (#79)
+Done:
+- Multi-folder selection UI: one "primary" + up to two "secondaries"
+- Engine: Rayon parallel hashing, size pre-filter, system file filtering
+- Cross-folder diff: unique files per secondary (content not present in primary)
+- User reviews unique files per source; toggles Keep/Skip
+- Engine builds output directory (fold-ins only; no swap)
+- Scan resume: results persisted to `~/.filesteward/sessions.json`; resume card on re-open
+- Progress: linear bar, per-source status rows, elapsed MM:SS timer for scan + build
+- Overwrite warning dialog before build
+- Target directory: user-configurable location + name (auto-populated from primary)
+- Dangerous path guard (rejects volume roots and system directories)
+- Version shown in AppBar; splash screen removed
+- Rust binary bundled inside .app via Xcode Run Script build phase
+- Rust binary resolved from bundle-sibling path (`Contents/MacOS/rust_core`)
 
-### Iteration 6 — iPad/iPhone Review Client
+### Iteration 6 — Consolidate v2: Per-Folder Orchestrated Rationalize + Fold
+**Goal:** Replace the primary/secondary model with a peer-folder workflow that produces a
+fully deduplicated canonical output from N source directories.
+
+**Design (agreed 2026-04-02):**
+
+All folders are peers — no primary/secondary distinction. The workflow is an orchestrated
+two-step applied to each folder in sequence:
+
+1. **Rationalize** — scan the folder for internal duplicates, system files, and unwanted
+   directories. User reviews and approves what to keep. Ignore rules apply here.
+2. **Fold in** — compare the rationalized folder against the accumulated target (everything
+   approved so far). Surface unique files. User reviews and approves what to add.
+
+The target folder starts empty. Folder 1's entire approved content becomes the initial base.
+Each subsequent folder contributes only what the target doesn't already have (by content hash).
+The result is one clean directory with no duplicates from any source.
+
+Order matters only for path conflicts: when the same content appears in multiple folders at
+different relative paths, whichever folder is processed first wins the path in the target.
+
+**Work required:**
+
+Rust:
+- New `consolidate_rationalize_scan` command — walk one folder, return internal duplicate
+  groups, system files, and ignore-matched paths (reuses rationalize.rs logic)
+- Modified `consolidate_fold_scan` command — compare one folder against an accumulated hash
+  set passed in (or stored in the session registry), return unique files
+- Session registry tracks accumulated hashes so fold scans compose correctly across folders
+
+Dart:
+- New event models for rationalize scan results (duplicate groups, system files)
+- Consolidate screen redesigned with per-folder phase sequence:
+  sourceSelection → [for each folder: rationalizeScan → rationalizeReview → foldScan →
+  foldReview] → building → result
+- Drop "Primary / Secondary" labels; use "Folder 1 / 2 / 3"
+- Ignore-directory input per folder (or shared across all)
+
+### Iteration 7 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
 
-### Iteration 7 — Advanced UX + Performance
+### Iteration 8 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
 - Performance tuning for large external drives (100k+ files)
 - Rules engine: user-defined naming and placement rules
@@ -142,7 +188,11 @@ It is **not** a bulk-delete tool; it is an analysis and decision-support tool. E
 
 **Rust binary resolution order:**
 1. `FILESTEWARD_RUST_BINARY` env var
-2. `rust_core/target/debug/rust_core` (checked at 1–3 directory levels up)
+2. Sibling of the Flutter executable (`Contents/MacOS/rust_core` in .app bundle)
+3. `rust_core/target/debug/rust_core` (checked at 1–3 directory levels up)
+
+The Xcode project includes a "Copy Rust Binary" Run Script build phase that copies the debug
+(or release if available) Rust binary into `Contents/MacOS/` on every `flutter build macos`.
 
 ## Key Files
 
@@ -156,7 +206,10 @@ It is **not** a bulk-delete tool; it is an analysis and decision-support tool. E
 | `lib/manifest_service.dart` | Legacy manifest scan — spawns Rust binary, parses stdout JSON |
 | `lib/manifest_models.dart` | `ManifestEntry`, `ManifestResult` |
 | `lib/app_version.dart` | `kAppVersion` constant — keep in sync with `pubspec.yaml` |
-| `lib/splash_screen.dart` | Launch splash showing version number |
+| `lib/consolidate_screen.dart` | Consolidate UI — source selection, scan, review, build, result |
+| `lib/consolidate_service.dart` | Spawns Rust binary in `consolidate` mode; streams NDJSON events |
+| `lib/consolidate_models.dart` | Consolidate IPC models — events and commands |
+| `rust_core/src/consolidate.rs` | Consolidate engine — scan, diff, build, session registry |
 | `rust_core/src/rationalize.rs` | Rationalize engine — scan, findings, build, swap |
 | `rust_core/src/convention.rs` | Naming convention classification and rename suggestions |
 | `rust_core/src/main.rs` | Manifest scan path — walker, hashing, duplicate groups |

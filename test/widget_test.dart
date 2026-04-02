@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:filesteward/app_version.dart';
 import 'package:filesteward/main.dart';
 
 void main() {
@@ -7,17 +8,11 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(const FileStewardApp());
-
-    // Splash screen should be visible first.
-    expect(find.text('FileSteward'), findsOneWidget);
-    expect(find.text('v0.4.0'), findsOneWidget);
-
-    // Advance past the splash timer and settle the navigation animation.
-    await tester.pump(const Duration(milliseconds: 1500));
     await tester.pumpAndSettle();
 
-    // App bar title still present on home page.
+    // App bar shows title and version subtitle.
     expect(find.text('FileSteward'), findsOneWidget);
+    expect(find.text('v$kAppVersion'), findsOneWidget);
 
     // Folder selection button visible before any folder is chosen.
     expect(find.text('Select Folder'), findsOneWidget);

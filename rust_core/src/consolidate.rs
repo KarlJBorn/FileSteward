@@ -28,12 +28,14 @@
 /// { "command": "consolidate_finalize", "session_id": "2026-04-01T15-00-00" }
 /// ```
 use hex;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,10 @@ struct SecondaryRecord {
     files_folded_in: usize,
     files_skipped: usize,
     skipped: Vec<String>,
+    /// Unique files found during the scan phase — persisted so the scan
+    /// can be resumed without rehashing.
+    #[serde(default)]
+    unique_files: Vec<UniqueFile>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -84,6 +90,13 @@ enum ConsolidateCommand {
     ConsolidateScan(ScanCmd),
     ConsolidateBuild(BuildCmd),
     ConsolidateFinalize(FinalizeCmd),
+    ConsolidateLoad(LoadCmd),
+}
+
+#[derive(Deserialize)]
+struct LoadCmd {
+    primary: String,
+    secondaries: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,7 +141,7 @@ struct ConsolidateProgressEvent {
     files_scanned: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct UniqueFile {
     relative_path: String,
     size_bytes: u64,
@@ -163,6 +176,12 @@ struct ConsolidateFinalizeComplete {
     #[serde(rename = "type")]
     event_type: &'static str,
     session_id: String,
+}
+
+#[derive(Serialize)]
+struct ConsolidateLoadNotFound {
+    #[serde(rename = "type")]
+    event_type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -301,13 +320,47 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
-fn collect_hashes(root: &Path) -> HashSet<String> {
-    let mut hashes = HashSet::new();
-    collect_hashes_dir(root, root, &mut hashes);
-    hashes
+/// Directory names that are always skipped during walking.
+const SKIP_DIRS: &[&str] = &[
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    ".DocumentRevisions-V100",
+    ".PKInstallSandboxManager",
+    "__MACOSX",
+    ".git",
+    ".svn",
+    "node_modules",
+];
+
+/// File names that are always skipped.
+const SKIP_FILES: &[&str] = &[
+    ".DS_Store",
+    ".localized",
+    "Thumbs.db",
+    "desktop.ini",
+    ".dropbox",
+    ".dropbox.cache",
+];
+
+fn should_skip_dir(name: &str) -> bool {
+    // Skip hidden dirs (starting with '.') and known system dirs.
+    name.starts_with('.') || SKIP_DIRS.contains(&name)
 }
 
-fn collect_hashes_dir(root: &Path, current: &Path, hashes: &mut HashSet<String>) {
+fn should_skip_file(name: &str) -> bool {
+    SKIP_FILES.contains(&name)
+}
+
+/// Walk a directory tree and return all non-system file paths.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    walk_files_dir(root, &mut paths);
+    paths
+}
+
+fn walk_files_dir(current: &Path, out: &mut Vec<PathBuf>) {
     let read_dir = match fs::read_dir(current) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -317,83 +370,119 @@ fn collect_hashes_dir(root: &Path, current: &Path, hashes: &mut HashSet<String>)
             Ok(e) => e,
             Err(_) => continue,
         };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         let path = entry.path();
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
         if metadata.is_dir() {
-            collect_hashes_dir(root, &path, hashes);
+            if !should_skip_dir(&name_str) {
+                walk_files_dir(&path, out);
+            }
         } else if metadata.is_file() {
-            if let Some(hash) = hash_file(&path) {
-                hashes.insert(hash);
+            if !should_skip_file(&name_str) {
+                out.push(path);
             }
         }
     }
 }
 
-fn diff_secondary(secondary_root: &Path, primary_hashes: &HashSet<String>) -> Vec<UniqueFile> {
-    let mut unique = Vec::new();
-    let mut files_scanned = 0usize;
-    diff_secondary_dir(
-        secondary_root,
-        secondary_root,
-        primary_hashes,
-        &mut unique,
-        &mut files_scanned,
-        &secondary_root.to_string_lossy().to_string(),
-    );
-    unique.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    unique
+/// Build a hash set of all SHA-256 digests in [root], hashing in parallel.
+/// Returns (hash_set, size_set, file_count).
+fn collect_hashes(root: &Path) -> (HashSet<String>, HashSet<u64>, usize) {
+    let files = walk_files(root);
+    let count = files.len();
+    let (hashes, sizes): (HashSet<String>, HashSet<u64>) = files
+        .par_iter()
+        .map(|p| {
+            let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let hash = hash_file(p);
+            (hash, size)
+        })
+        .fold(
+            || (HashSet::new(), HashSet::new()),
+            |(mut hs, mut ss), (hash, size)| {
+                if let Some(h) = hash {
+                    hs.insert(h);
+                }
+                ss.insert(size);
+                (hs, ss)
+            },
+        )
+        .reduce(
+            || (HashSet::new(), HashSet::new()),
+            |(mut hs1, mut ss1), (hs2, ss2)| {
+                hs1.extend(hs2);
+                ss1.extend(ss2);
+                (hs1, ss1)
+            },
+        );
+    (hashes, sizes, count)
 }
 
-fn diff_secondary_dir(
-    root: &Path,
-    current: &Path,
+/// Diff [secondary_root] against [primary_hashes], returning files whose
+/// content is not present in the primary. Hashing runs in parallel;
+/// progress events are emitted on the calling thread every 500 files.
+/// Files whose size is not present in [primary_sizes] are immediately
+/// classified as unique without hashing.
+fn diff_secondary(
+    secondary_root: &Path,
     primary_hashes: &HashSet<String>,
-    unique: &mut Vec<UniqueFile>,
-    files_scanned: &mut usize,
+    primary_sizes: &HashSet<u64>,
     source_label: &str,
-) {
-    let read_dir = match fs::read_dir(current) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry_result in read_dir {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if metadata.is_dir() {
-            diff_secondary_dir(root, &path, primary_hashes, unique, files_scanned, source_label);
-        } else if metadata.is_file() {
-            *files_scanned += 1;
-            if *files_scanned % 50 == 0 {
+) -> Vec<UniqueFile> {
+    let files = walk_files(secondary_root);
+    let total = files.len();
+    let counter = AtomicUsize::new(0);
+
+    // Emit a starting progress event so the UI sees movement immediately.
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: source_label.to_string(),
+        files_scanned: 0,
+    });
+
+    let unique: Vec<UniqueFile> = files
+        .par_iter()
+        .filter_map(|path| {
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            // Emit progress on rough multiples of 5% of total (min 50 files).
+            let interval = (total / 20).max(50);
+            if n % interval == 0 {
                 emit(&ConsolidateProgressEvent {
                     event_type: "consolidate_progress",
                     source: source_label.to_string(),
-                    files_scanned: *files_scanned,
+                    files_scanned: n,
                 });
             }
-            if let Some(hash) = hash_file(&path) {
-                if !primary_hashes.contains(&hash) {
-                    let relative_path = path
-                        .strip_prefix(root)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    unique.push(UniqueFile {
-                        relative_path,
-                        size_bytes: metadata.len(),
-                    });
-                }
+            let metadata = fs::metadata(path).ok()?;
+            let size = metadata.len();
+            let relative_path = path
+                .strip_prefix(secondary_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            // Size pre-filter: if no primary file has this size, no primary
+            // file can have matching content — skip hashing entirely.
+            if !primary_sizes.contains(&size) {
+                return Some(UniqueFile { relative_path, size_bytes: size });
             }
-        }
-    }
+            // Size matches at least one primary file — must hash to be sure.
+            let hash = hash_file(path)?;
+            if primary_hashes.contains(&hash) {
+                return None;
+            }
+            Some(UniqueFile {
+                relative_path,
+                size_bytes: size,
+            })
+        })
+        .collect();
+
+    let mut sorted = unique;
+    sorted.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    sorted
 }
 
 // ---------------------------------------------------------------------------
@@ -428,19 +517,42 @@ fn handle_scan(cmd: ScanCmd) {
         source: cmd.primary.clone(),
         files_scanned: 0,
     });
-    let primary_hashes = collect_hashes(&primary_path);
+    let (primary_hashes, primary_sizes, primary_count) = collect_hashes(&primary_path);
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: cmd.primary.clone(),
+        files_scanned: primary_count,
+    });
 
     let mut secondary_results = Vec::new();
     for sec_path_str in &cmd.secondaries {
         let sec_path = PathBuf::from(sec_path_str);
-        let unique_files = diff_secondary(&sec_path, &primary_hashes);
+        let unique_files = diff_secondary(&sec_path, &primary_hashes, &primary_sizes, sec_path_str);
         secondary_results.push(SecondaryResult {
             path: sec_path_str.clone(),
             unique_files,
         });
     }
 
-    // Write session to registry as in_progress.
+    // Write session to registry, including unique file lists so the scan
+    // can be resumed without rehashing.
+    let analyzed = now_iso();
+    let registry_secondaries: Vec<SecondaryRecord> = secondary_results
+        .iter()
+        .map(|s| SecondaryRecord {
+            path: s.path.clone(),
+            analyzed: analyzed.clone(),
+            status: "scanned".to_string(),
+            files_folded_in: 0,
+            files_skipped: 0,
+            skipped: vec![],
+            unique_files: s.unique_files.iter().map(|f| UniqueFile {
+                relative_path: f.relative_path.clone(),
+                size_bytes: f.size_bytes,
+            }).collect(),
+        })
+        .collect();
+
     let mut registry = load_registry();
     upsert_session(&mut registry, SessionRecord {
         id: session_id.clone(),
@@ -448,7 +560,7 @@ fn handle_scan(cmd: ScanCmd) {
         target: cmd.target.clone().unwrap_or_default(),
         primary: cmd.primary.clone(),
         status: "in_progress".to_string(),
-        secondaries: vec![],
+        secondaries: registry_secondaries,
     });
     save_registry(&registry);
 
@@ -499,6 +611,13 @@ fn handle_build(cmd: BuildCmd) {
                 Ok(_) => {
                     folded += 1;
                     files_copied += 1;
+                    if files_copied % 10 == 0 {
+                        emit(&ConsolidateProgressEvent {
+                            event_type: "consolidate_progress",
+                            source: cmd.target.clone(),
+                            files_scanned: files_copied,
+                        });
+                    }
                 }
                 Err(e) => {
                     emit_error(&format!("Failed to copy {}: {}", rel, e));
@@ -514,6 +633,7 @@ fn handle_build(cmd: BuildCmd) {
             files_folded_in: folded,
             files_skipped: skipped.len(),
             skipped: skipped.clone(),
+            unique_files: vec![], // scan results already persisted; not needed post-build
         });
     }
 
@@ -547,6 +667,53 @@ fn handle_finalize(cmd: FinalizeCmd) {
     });
 }
 
+fn handle_load(cmd: LoadCmd) {
+    let registry = load_registry();
+
+    // Find the most recent in_progress or complete session matching
+    // this primary + secondary set.
+    let mut secondaries_sorted = cmd.secondaries.clone();
+    secondaries_sorted.sort();
+
+    let session = registry.sessions.iter()
+        .filter(|s| {
+            if s.primary != cmd.primary { return false; }
+            if s.status == "finalized" { return false; }
+            // Secondary paths must match exactly.
+            let mut reg_paths: Vec<String> =
+                s.secondaries.iter().map(|r| r.path.clone()).collect();
+            reg_paths.sort();
+            reg_paths == secondaries_sorted
+        })
+        // Take the most recently created session.
+        .max_by(|a, b| a.created.cmp(&b.created));
+
+    match session {
+        None => {
+            emit(&ConsolidateLoadNotFound {
+                event_type: "consolidate_load_not_found",
+            });
+        }
+        Some(s) => {
+            let secondaries: Vec<SecondaryResult> = s.secondaries.iter().map(|r| {
+                SecondaryResult {
+                    path: r.path.clone(),
+                    unique_files: r.unique_files.iter().map(|f| UniqueFile {
+                        relative_path: f.relative_path.clone(),
+                        size_bytes: f.size_bytes,
+                    }).collect(),
+                }
+            }).collect();
+            emit(&ConsolidateScanComplete {
+                event_type: "consolidate_scan_complete",
+                session_id: s.id.clone(),
+                primary: s.primary.clone(),
+                secondaries,
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stdin dispatch — called from main.rs
 // ---------------------------------------------------------------------------
@@ -561,6 +728,7 @@ pub fn run_from_stdin() {
         Ok(ConsolidateCommand::ConsolidateScan(cmd)) => handle_scan(cmd),
         Ok(ConsolidateCommand::ConsolidateBuild(cmd)) => handle_build(cmd),
         Ok(ConsolidateCommand::ConsolidateFinalize(cmd)) => handle_finalize(cmd),
+        Ok(ConsolidateCommand::ConsolidateLoad(cmd)) => handle_load(cmd),
         Err(e) => emit_error(&format!("Failed to parse consolidate command: {}", e)),
     }
 }

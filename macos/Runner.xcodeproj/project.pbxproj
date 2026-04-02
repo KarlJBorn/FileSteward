@@ -238,6 +238,7 @@
 				33CC10E92044A3C60003C045 /* Sources */,
 				33CC10EA2044A3C60003C045 /* Frameworks */,
 				33CC10EB2044A3C60003C045 /* Resources */,
+				C4B7E2F1A3D85C9E0F1A2B3C /* Copy Rust Binary */,
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				0FE1C0B958FBBCBDA7BD2391 /* [CP] Embed Pods Frameworks */,
@@ -323,6 +324,24 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		C4B7E2F1A3D85C9E0F1A2B3C /* Copy Rust Binary */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Rust Binary";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Copy rust_core binary into the app bundle alongside the Flutter executable.\nRUST_RELEASE=\"$SRCROOT/../rust_core/target/release/rust_core\"\nRUST_DEBUG=\"$SRCROOT/../rust_core/target/debug/rust_core\"\nDEST=\"$BUILT_PRODUCTS_DIR/$PRODUCT_NAME.app/Contents/MacOS/rust_core\"\n\nif [ -f \"$RUST_RELEASE\" ]; then\n  cp \"$RUST_RELEASE\" \"$DEST\"\n  echo \"Copied rust_core (release) to $DEST\"\nelif [ -f \"$RUST_DEBUG\" ]; then\n  cp \"$RUST_DEBUG\" \"$DEST\"\n  echo \"Copied rust_core (debug) to $DEST\"\nelse\n  echo \"error: Rust binary not found. Run: cargo build --manifest-path rust_core/Cargo.toml\" >&2\n  exit 1\nfi\n";
+		};
 		0FE1C0B958FBBCBDA7BD2391 /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
