@@ -576,6 +576,13 @@ fn handle_build(cmd: BuildCmd) {
                 Ok(_) => {
                     folded += 1;
                     files_copied += 1;
+                    if files_copied % 10 == 0 {
+                        emit(&ConsolidateProgressEvent {
+                            event_type: "consolidate_progress",
+                            source: cmd.target.clone(),
+                            files_scanned: files_copied,
+                        });
+                    }
                 }
                 Err(e) => {
                     emit_error(&format!("Failed to copy {}: {}", rel, e));
