@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import 'consolidate_screen.dart';
 import 'manifest_models.dart';
 import 'manifest_service.dart';
 import 'rationalize_screen.dart';
@@ -693,20 +694,44 @@ class _FileStewardHomePageState extends State<FileStewardHomePage> {
               ],
             ),
             const SizedBox(height: 8),
-            ElevatedButton.icon(
-              onPressed: (_isInventoryRunning || _isRunning)
-                  ? null
-                  : () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const RationalizeScreen(),
-                        ),
-                      ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0E70C0),
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.auto_fix_high),
-              label: const Text('Rationalize Folder…'),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: (_isInventoryRunning || _isRunning)
+                        ? null
+                        : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const RationalizeScreen(),
+                              ),
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0E70C0),
+                      foregroundColor: Colors.white,
+                    ),
+                    icon: const Icon(Icons.auto_fix_high),
+                    label: const Text('Rationalize…'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: (_isInventoryRunning || _isRunning)
+                        ? null
+                        : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const ConsolidateScreen(),
+                              ),
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal[700],
+                      foregroundColor: Colors.white,
+                    ),
+                    icon: const Icon(Icons.merge),
+                    label: const Text('Consolidate…'),
+                  ),
+                ),
+              ],
             ),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
