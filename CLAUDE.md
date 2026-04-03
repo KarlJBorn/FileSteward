@@ -173,11 +173,38 @@ Done:
 6. **Build** — copy approved files to target preserving source structure (progress + timer)
 7. **Done** — stats, open target folder button
 
+**Folder matching across sources:**
+Folders are matched (treated as the same logical folder) at two levels:
+1. Exact name match — `My Pictures` in source A and `My Pictures` in source B
+2. OS-equivalent name match — Windows and macOS use different canonical names for
+   the same standard folders:
+   | Windows       | macOS/cross-platform |
+   |---------------|----------------------|
+   | My Pictures   | Pictures             |
+   | My Documents  | Documents            |
+   | My Videos     | Movies               |
+   | My Music      | Music                |
+   | Desktop       | Desktop              |
+   The target always uses the current OS's canonical name (macOS for now).
+   The mapping is platform-aware and must flex for Windows targets in future.
+3. Content overlap match (future iteration) — differently named folders with high
+   duplicate content rate
+
+**Winner selection (when the same logical folder exists in multiple sources):**
+- App suggests the most complete / most recent source version; user can override
+- Terminology: source folders → winner (suggested) → target
+- Non-winner folders contribute only their unique files into the winner's structure
+
 **Duplicate resolution rules (when same content exists in multiple paths):**
 - If user excluded one path's folder during Rationalize, the included path wins automatically
 - If both paths included: most recent modification time wins
 - If timestamps equal: penalty ranker score wins (shallower path, better folder name, etc.)
 - If scores equal: ambiguous — surface to user
+
+**Auto-excluded file types (cross-platform junk):**
+Windows: .lnk, Thumbs.db, desktop.ini, .url, .tmp
+macOS: .DS_Store, .AppleDouble, __MACOSX/
+Both: system/temp folder contents (already in should_skip_dir)
 
 **Session continuation (future):**
 After a completed build, user can add another folder and pick up where they left off.
