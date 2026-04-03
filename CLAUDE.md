@@ -146,34 +146,59 @@ Done:
   folder-level keep/discard decision, not individual file decisions)
 - These issues drive the Iteration 7 redesign
 
-### Iteration 7 — UX Redesign: Navigation, Wayfinding, and Consolidate Review Model
+### Iteration 7 — UX Redesign: Navigation, Wayfinding, and Consolidate Workflow
 
-**Two parallel tracks:**
+**Design agreed 2026-04-03:**
 
-**Track A — App-wide UI/UX review**
-The app has accumulated screens and navigation patterns iteration by iteration without a
-coherent overall model. Before adding more features, conduct a full UI review:
-- Map all screens and flows (Rationalize + Consolidate end to end)
-- Define a consistent navigation model (forward/back/cancel, destructive vs recoverable)
-- Improve wayfinding — user should always know where they are, what's next, what was done
-- Ensure Rationalize and Consolidate feel like the same app
-- Review home screen entry point clarity
+**Core terminology clarification:**
+- "Rationalize" = scope selection (browse folder tree, exclude junk dirs/file types, no hashing)
+- "Consolidate" = the full workflow: rationalize all folders → scan → review → build
 
-**Track B — Consolidate review model redesign**
-Replace the per-folder flat file list with a smarter unified model:
-- Unified scan across all folders at once (single Rust command, not per-folder loop)
-- Folder similarity scoring: detect when two folders share high content overlap and offer
-  a folder-level keep/discard decision before file-level review
-- Penalty ranker auto-resolves clear duplicate cases silently
-- Ambiguous duplicates (equal score) surfaced for user input
-- Scope selection before hashing: folder tree with checkboxes to exclude dirs/file types
-- Unique files review only shows the meaningful delta
+**Agreed 7-step Consolidate workflow:**
 
-Reusable pieces identified:
-- Rust: all hash/walk/diff/penalty functions, v2_build, accumulate
-- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen (for scope selection)
-- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard from rationalize_screen (for ambiguous groups)
-- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding, _buildResult
+1. **Select folders** — add N backup folders (no primary/secondary), set target directory
+2. **Rationalize** — one folder at a time: quick inventory scan (no hashing), show folder tree
+   with checkboxes, system/junk dirs auto-excluded by default, file type filter panel.
+   User carves out irrelevant directories (Windows system, Temp, etc.)
+3. **Scope summary** — per-folder file counts + total size across all folders; chance to go
+   back and adjust any folder's scope before committing to the hash scan
+4. **Scan** — hash all in-scope files across all folders simultaneously (progress + timer)
+5. **Review** — summary card first:
+   - "X files will be copied to target"
+   - "Y duplicate groups auto-resolved by ranker"
+   - "Z ambiguous groups need your input" (only action required)
+   - "W unique files from folders with no overlap"
+   Only ambiguous groups require user decisions. Auto-resolved and unique files visible
+   but collapsed — user can expand to inspect or override.
+6. **Build** — copy approved files to target preserving source structure (progress + timer)
+7. **Done** — stats, open target folder button
+
+**Duplicate resolution rules (when same content exists in multiple paths):**
+- If user excluded one path's folder during Rationalize, the included path wins automatically
+- If both paths included: most recent modification time wins
+- If timestamps equal: penalty ranker score wins (shallower path, better folder name, etc.)
+- If scores equal: ambiguous — surface to user
+
+**Session continuation (future):**
+After a completed build, user can add another folder and pick up where they left off.
+The session knows what hashes are already in the target; new folder goes through
+Rationalize → Scan (incremental) → Review → Build without re-scanning existing content.
+
+**App-wide UX principles (apply across both Rationalize and Consolidate):**
+- Always show which step you're on and how many remain
+- Back navigation available at every step except after Build
+- System/junk folders auto-excluded by default everywhere
+- Progress bars + elapsed timers for all long-running operations
+- Destructive actions require explicit confirmation
+
+**Reusable pieces:**
+- Rust: hash_file, walk_files, should_skip_dir/file, collect_hashes, penalty_score,
+  v2_build, accumulate — all carry forward unchanged
+- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel (rationalize_screen) → adapt for
+  Rationalize step folder tree with checkboxes
+- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard (rationalize_screen) → ambiguous groups
+- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding,
+  _buildResult (consolidate_screen) → carry forward
 
 ### Iteration 8 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
