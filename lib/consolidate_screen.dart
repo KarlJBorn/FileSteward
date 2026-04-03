@@ -6,41 +6,35 @@ import 'package:flutter/material.dart';
 
 import 'consolidate_models.dart';
 import 'consolidate_service.dart';
+import 'manifest_models.dart';
+import 'manifest_service.dart';
 
 // ---------------------------------------------------------------------------
-// Screen phases
+// Steps
 // ---------------------------------------------------------------------------
 
-enum _Phase {
-  sourceSelection,
-  rationalizingFolder, // scanning for internal dupes
-  rationalizeReview, // user reviews dupe groups for current folder
-  foldingFolder, // scanning for unique vs base
-  foldReview, // user reviews unique files to fold in
-  building,
-  result,
+enum _Step {
+  select,   // 0 — choose source folders + target
+  filter,   // 1 — extension filter (inventory)
+  scope,    // 2 — scope review before scan
+  scan,     // 3 — running unified scan (auto)
+  review,   // 4 — review duplicate groups
+  build,    // 5 — executing copy (auto)
+  done,     // 6 — result
 }
 
-// ---------------------------------------------------------------------------
-// Review state types
-// ---------------------------------------------------------------------------
-
-class _DupeGroupDecision {
-  final ConsolidateDuplicateGroup group;
-  String keepPath;
-
-  _DupeGroupDecision({required this.group}) : keepPath = group.suggestedKeep;
-}
-
-class _ReviewItem {
-  final UniqueFile file;
-  bool keep = true;
-
-  _ReviewItem({required this.file});
-}
+const _stepLabels = [
+  'Select',
+  'Filter',
+  'Scope',
+  'Scan',
+  'Review',
+  'Build',
+  'Done',
+];
 
 // ---------------------------------------------------------------------------
-// ConsolidateScreen
+// Screen
 // ---------------------------------------------------------------------------
 
 class ConsolidateScreen extends StatefulWidget {
@@ -52,16 +46,61 @@ class ConsolidateScreen extends StatefulWidget {
 
 class _ConsolidateScreenState extends State<ConsolidateScreen> {
   final _service = const ConsolidateService();
+  final _manifestService = const ManifestService();
 
-  _Phase _phase = _Phase.sourceSelection;
+  _Step _step = _Step.select;
 
-  // Source selection
+  // Step 1 — Select
   final List<String> _folders = [];
-
-  // Target
   String? _targetParentPath;
   final TextEditingController _targetNameController = TextEditingController();
   bool _targetManuallySet = false;
+
+  // Step 2 — Filter (inventory)
+  Map<String, InventoryResult?> _inventories = {};
+  bool _isLoadingInventories = false;
+  Set<String> _includeExtensions = {};
+
+  // Step 3 — Scope (no async work here, just confirmation)
+
+  // Step 4 — Scan
+  int _scanFilesCount = 0;
+  String _scanningSource = '';
+  DateTime? _scanStartTime;
+  Duration _elapsed = Duration.zero;
+  Timer? _elapsedTimer;
+  String? _sessionId;
+
+  // Step 5 — Review
+  ConsolidateUnifiedScanComplete? _scanResult;
+  // Map: group index → chosen absolute path (starts at suggestedKeep)
+  late Map<int, String> _keeperDecisions;
+
+  // Step 6 — Build
+  int _buildDone = 0;
+  int _buildTotal = 0;
+
+  // Step 7 — Done
+  int _filesCopied = 0;
+  String? _targetPath;
+
+  // Shared
+  String? _errorMessage;
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  @override
+  void dispose() {
+    _elapsedTimer?.cancel();
+    _targetNameController.dispose();
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers — target path
+  // ---------------------------------------------------------------------------
 
   String? get _resolvedTargetPath {
     final parent = _targetParentPath;
@@ -75,59 +114,41 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     final parts = folderPath.split('/');
     final parent =
         parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '/';
-    final name = '${parts.last}_consolidated';
     setState(() {
       _targetParentPath = parent;
-      _targetNameController.text = name;
+      _targetNameController.text = '${parts.last}_consolidated';
     });
   }
 
-  // Per-folder processing state
-  int _currentFolderIndex = 0;
-  String? _sessionId;
-
-  // Rationalize review: folder → decisions
-  final Map<String, List<_DupeGroupDecision>> _dupeDecisions = {};
-  List<UniqueFile> _cleanFiles = [];
-
-  // Fold review: folder → items
-  final Map<String, List<_ReviewItem>> _foldReviewItems = {};
-
-  // Progress
-  int _scanFilesCount = 0;
-
-  // Build
-  int _buildFilesTotal = 0;
-  int _buildFilesDone = 0;
-  String? _targetPath;
-
-  // Result
-  int _filesCopied = 0;
-
-  // Error
-  String? _errorMessage;
-
-  // Timer
-  DateTime? _scanStartTime;
-  Duration _scanElapsed = Duration.zero;
-  Timer? _elapsedTimer;
-
-  void _startElapsedTimer() {
-    _scanStartTime = DateTime.now();
-    _scanElapsed = Duration.zero;
-    _elapsedTimer?.cancel();
-    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_scanStartTime != null) {
-        setState(() {
-          _scanElapsed = DateTime.now().difference(_scanStartTime!);
-        });
-      }
-    });
+  bool _isDangerousPath(String path) {
+    final parts =
+        path.replaceAll(RegExp(r'/$'), '').split('/').where((p) => p.isNotEmpty).toList();
+    if (parts.length <= 1) return true;
+    if (parts.length == 2 && parts[0] == 'Volumes') return true;
+    const systemDirs = {
+      'System', 'Library', 'Applications', 'bin', 'sbin',
+      'usr', 'etc', 'var', 'private', 'cores', 'opt',
+    };
+    if (parts.length == 1 && systemDirs.contains(parts[0])) return true;
+    return false;
   }
 
-  void _stopElapsedTimer() {
-    _elapsedTimer?.cancel();
-    _elapsedTimer = null;
+  String _leafName(String path) => path.split('/').last;
+
+  String _shortPath(String path) {
+    final parts = path.split('/');
+    return parts.length > 3
+        ? '…/${parts.sublist(parts.length - 2).join('/')}'
+        : path;
+  }
+
+  String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
   String _formatElapsed(Duration d) {
@@ -137,294 +158,142 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 
-  @override
-  void dispose() {
+  Color _folderColor(int index) {
+    const colors = [
+      Color(0xFF0E70C0),
+      Color(0xFF0A7764),
+      Color(0xFF7B3FB5),
+      Color(0xFFB85C00),
+      Color(0xFF1B6B3A),
+      Color(0xFF8B3A3A),
+    ];
+    return colors[index % colors.length];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Timer
+  // ---------------------------------------------------------------------------
+
+  void _startTimer() {
+    _scanStartTime = DateTime.now();
+    _elapsed = Duration.zero;
     _elapsedTimer?.cancel();
-    _targetNameController.dispose();
-    super.dispose();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Source selection helpers
-  // ---------------------------------------------------------------------------
-
-  bool _isDangerousPath(String path) {
-    final normalized =
-        path.endsWith('/') ? path.substring(0, path.length - 1) : path;
-    final parts = normalized.split('/').where((p) => p.isNotEmpty).toList();
-    if (parts.isEmpty) return true;
-    if (parts.length == 1) return true;
-    if (parts.length == 2 && parts[0] == 'Volumes') return true;
-    const systemDirs = {
-      'System',
-      'Library',
-      'Applications',
-      'bin',
-      'sbin',
-      'usr',
-      'etc',
-      'var',
-      'private',
-      'cores',
-      'opt',
-    };
-    if (parts.length == 1 && systemDirs.contains(parts[0])) return true;
-    return false;
-  }
-
-  Future<void> _addFolder() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.isEmpty) return;
-    if (_isDangerousPath(path)) {
-      _showVolumeRootError();
-      return;
-    }
-    if (_folders.contains(path)) return;
-    setState(() {
-      _folders.add(path);
-    });
-    if (_folders.length == 1) {
-      _autoPopulateTarget(path);
-    }
-  }
-
-  Future<void> _pickTargetParent() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.isEmpty) return;
-    setState(() {
-      _targetParentPath = path;
-      _targetManuallySet = true;
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_scanStartTime != null && mounted) {
+        setState(() => _elapsed = DateTime.now().difference(_scanStartTime!));
+      }
     });
   }
 
-  void _showVolumeRootError() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Please select a specific folder, not a whole drive or volume root.',
-        ),
-        duration: Duration(seconds: 4),
-      ),
-    );
+  void _stopTimer() {
+    _elapsedTimer?.cancel();
+    _elapsedTimer = null;
   }
 
-  void _removeFolder(int index) {
-    setState(() => _folders.removeAt(index));
-  }
-
-  bool get _canStart =>
-      _folders.isNotEmpty && _resolvedTargetPath != null;
-
   // ---------------------------------------------------------------------------
-  // Per-folder flow
+  // Step transitions
   // ---------------------------------------------------------------------------
 
-  String get _currentFolder => _folders[_currentFolderIndex];
-
-  Future<void> _startRationalizeScan() async {
-    final folder = _currentFolder;
-    _startElapsedTimer();
+  // Step 0 → 1: load inventories for all selected folders
+  Future<void> _advanceToFilter() async {
     setState(() {
-      _phase = _Phase.rationalizingFolder;
-      _scanFilesCount = 0;
+      _isLoadingInventories = true;
+      _step = _Step.filter;
+      _inventories = {};
+      _includeExtensions = {};
       _errorMessage = null;
     });
 
-    String? sessionId;
-    List<_DupeGroupDecision>? decisions;
-    List<UniqueFile>? cleanFiles;
+    final results = <String, InventoryResult?>{};
+    for (final folder in _folders) {
+      try {
+        final inv = await _manifestService.buildInventory(folder);
+        results[folder] = inv;
+      } catch (_) {
+        results[folder] = null;
+      }
+    }
 
-    await for (final event in _service.rationalizeScan(
-      sessionId: _sessionId ?? '',
-      folder: folder,
+    if (mounted) {
+      setState(() {
+        _inventories = results;
+        _isLoadingInventories = false;
+      });
+    }
+  }
+
+  // Step 1 → 2
+  void _advanceToScope() => setState(() => _step = _Step.scope);
+
+  // Step 2 → 3: start scan
+  Future<void> _startScan() async {
+    setState(() {
+      _step = _Step.scan;
+      _scanFilesCount = 0;
+      _scanningSource = '';
+      _errorMessage = null;
+    });
+    _startTimer();
+
+    final extensions = _includeExtensions.isEmpty
+        ? <String>[]
+        : _includeExtensions.toList();
+
+    ConsolidateUnifiedScanComplete? scanComplete;
+
+    await for (final event in _service.unifiedScan(
+      sessionId: '',
+      folders: _folders,
+      target: _resolvedTargetPath ?? '',
+      includeExtensions: extensions,
     )) {
       switch (event) {
-        case ConsolidateProgress(:final filesScanned):
-          setState(() => _scanFilesCount = filesScanned);
-        case ConsolidateRationalizeScanComplete(
-            sessionId: final sid,
-            duplicateGroups: final groups,
-            cleanFiles: final clean,
-          ):
-          sessionId = sid;
-          decisions =
-              groups.map((g) => _DupeGroupDecision(group: g)).toList();
-          cleanFiles = clean;
+        case ConsolidateProgress(:final source, :final filesScanned):
+          setState(() {
+            _scanFilesCount = filesScanned;
+            _scanningSource = source;
+          });
         case ConsolidateError(:final message):
-          _stopElapsedTimer();
+          _stopTimer();
           setState(() {
             _errorMessage = message;
-            _phase = _Phase.sourceSelection;
+            _step = _Step.scope;
           });
           return;
         default:
+          if (event is ConsolidateUnifiedScanComplete) {
+            scanComplete = event;
+          }
           break;
       }
     }
 
-    _stopElapsedTimer();
-    if (sessionId == null) {
+    _stopTimer();
+
+    if (scanComplete == null) {
       setState(() {
-        _errorMessage = 'Rationalize scan did not complete.';
-        _phase = _Phase.sourceSelection;
+        _errorMessage = 'Scan did not complete.';
+        _step = _Step.scope;
       });
       return;
     }
 
-    setState(() {
-      _sessionId = sessionId;
-      _dupeDecisions[folder] = decisions ?? [];
-      _cleanFiles = cleanFiles ?? [];
-      _phase = _Phase.rationalizeReview;
-    });
-
-    // Auto-advance if no duplicates found.
-    if ((decisions ?? []).isEmpty) {
-      await Future.delayed(const Duration(milliseconds: 1500));
-      if (mounted) await _accumulateAndFoldScan();
-    }
-  }
-
-  Future<void> _accumulateAndFoldScan() async {
-    final folder = _currentFolder;
-    final decisions = _dupeDecisions[folder] ?? [];
-
-    // Hashes to approve = keepers from dupe groups + all clean files.
-    // We don't have hashes directly — we only have relative paths.
-    // So we accumulate relative paths and let the fold scan use path-based
-    // dedup. However, the Rust accumulate expects content hashes.
-    //
-    // The approach: after rationalize scan completes, we have the clean_files
-    // list and the keeper paths. We need their hashes. Rather than re-hashing
-    // here in Dart, we pass them as an accumulate call with empty hashes and
-    // rely on the fold scan doing a hash-based diff against the session's
-    // accumulated hashes set.
-    //
-    // The correct flow: the rationalize_scan result already knows the hashes
-    // internally, but doesn't return them to Dart. We need to send a
-    // fold_scan after accumulating the hashes for keepers.
-    //
-    // Simplest working approach without adding more IPC complexity:
-    // - Pass the approved hashes as an empty list in accumulate for now,
-    //   but we do need actual hashes for fold_scan to work.
-    // - Better: add hash fields to the rationalize scan response.
-    //
-    // For now we use the hashes returned in the clean_files response (they
-    // don't include hashes in the current model). We'll get hashes by having
-    // Rust include them in the output for the keeper suggestions.
-    //
-    // Given the current model doesn't include hashes in the output, we
-    // accumulate using an empty approved_hashes list on the first pass, which
-    // means fold_scan starts fresh. That's correct when this is the first
-    // folder — the accumulated set is empty and everything is unique.
-    // When processing subsequent folders, the accumulated set already has
-    // hashes from previous accumulateAndFoldScan calls.
-    //
-    // To properly track keepers from rationalize review, we ideally need
-    // to hash the keeper file. But that's a second Rust round-trip.
-    // For Iteration 6, we accept the limitation: rationalize scan deduplicates
-    // within the folder; fold scan deduplicates across the accumulated base.
-    // The keeper from a dupe group is the only copy we fold in, preventing
-    // intra-folder duplication in the output.
-
-    final keeperPaths =
-        decisions.map((d) => d.keepPath).toSet().toList();
-    final cleanPaths = _cleanFiles.map((f) => f.relativePath).toList();
-
-    // We pass all approved paths as "hashes" placeholder; accumulate with
-    // empty hashes since we track per-path approval in the build step.
-    // The fold scan will correctly check against the accumulated hash set
-    // from previous folders.
-    await for (final event in _service.accumulate(
-      sessionId: _sessionId!,
-      approvedHashes: const [], // hash-based dedup done at fold scan level
-      folders: _folders,
-      target: _resolvedTargetPath ?? '',
-    )) {
-      if (event is ConsolidateError) {
-        if (mounted) {
-          setState(() {
-            _errorMessage = event.message;
-            _phase = _Phase.sourceSelection;
-          });
-        }
-        return;
-      }
-    }
-
-    // Record keeper and clean file paths for later use in build step.
-    final reviewItems = [
-      ...keeperPaths.map((p) => _ReviewItem(file: UniqueFile(relativePath: p, sizeBytes: 0))),
-      ...cleanPaths.map((p) => _ReviewItem(file: _cleanFiles.firstWhere((f) => f.relativePath == p))),
-    ];
-
-    // Now fold scan to find unique-vs-base files.
-    await _startFoldScan(reviewItems);
-  }
-
-  Future<void> _startFoldScan(List<_ReviewItem> rationalizePending) async {
-    final folder = _currentFolder;
-    _startElapsedTimer();
-    setState(() {
-      _phase = _Phase.foldingFolder;
-      _scanFilesCount = 0;
-    });
-
-    List<UniqueFile>? uniqueFiles;
-
-    await for (final event in _service.foldScan(
-      sessionId: _sessionId!,
-      folder: folder,
-    )) {
-      switch (event) {
-        case ConsolidateProgress(:final filesScanned):
-          setState(() => _scanFilesCount = filesScanned);
-        case ConsolidateFoldScanComplete(uniqueFiles: final uf):
-          uniqueFiles = uf;
-        case ConsolidateError(:final message):
-          _stopElapsedTimer();
-          setState(() {
-            _errorMessage = message;
-            _phase = _Phase.sourceSelection;
-          });
-          return;
-        default:
-          break;
-      }
-    }
-
-    _stopElapsedTimer();
-
-    // Merge rationalize keepers and fold-scan unique files.
-    // Rationalize keepers always get included (they deduplicate internally).
-    // Fold-scan unique files get included if not already in keeper list.
-    final keeperPathSet =
-        rationalizePending.map((i) => i.file.relativePath).toSet();
-    final foldItems = (uniqueFiles ?? [])
-        .where((f) => !keeperPathSet.contains(f.relativePath))
-        .map((f) => _ReviewItem(file: f))
-        .toList();
+    // Initialise keeper decisions to suggested_keep for each group.
+    _keeperDecisions = {
+      for (int i = 0; i < scanComplete.duplicateGroups.length; i++)
+        i: scanComplete.duplicateGroups[i].suggestedKeep,
+    };
 
     setState(() {
-      _foldReviewItems[folder] = [...rationalizePending, ...foldItems];
-      _phase = _Phase.foldReview;
+      _sessionId = scanComplete!.sessionId;
+      _scanResult = scanComplete;
+      _step = _Step.review;
     });
   }
 
-  Future<void> _advanceToNextFolder() async {
-    if (_currentFolderIndex < _folders.length - 1) {
-      setState(() => _currentFolderIndex++);
-      await _startRationalizeScan();
-    } else {
-      await _startBuild();
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Build
-  // ---------------------------------------------------------------------------
-
+  // Step 4 → 5: start build
   Future<void> _startBuild() async {
+    final result = _scanResult!;
     final target = _resolvedTargetPath!;
 
     if (Directory(target).existsSync()) {
@@ -433,9 +302,8 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
         builder: (ctx) => AlertDialog(
           title: const Text('Output folder already exists'),
           content: Text(
-            '"${target.split('/').last}" already exists at the chosen location.\n\n'
-            'Any files with matching paths will be overwritten. '
-            'Continue?',
+            '"${_leafName(target)}" already exists.\n\n'
+            'Any files with matching paths will be overwritten. Continue?',
           ),
           actions: [
             TextButton(
@@ -456,42 +324,53 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       if (confirmed != true) return;
     }
 
-    final buildFolders = _folders.map((f) {
-      final items = _foldReviewItems[f] ?? [];
-      final kept =
-          items.where((i) => i.keep).map((i) => i.file.relativePath).toList();
-      return V2FolderBuildCmd(folder: f, relativePaths: kept);
-    }).toList();
+    // Collect approved files: unique files + kept copies from dupe groups.
+    // Organise by source folder → relative paths.
+    final byFolder = <String, List<String>>{};
 
-    final totalFiles =
-        buildFolders.fold(0, (s, f) => s + f.relativePaths.length);
+    for (final uf in result.uniqueFiles) {
+      byFolder.putIfAbsent(uf.folder, () => []).add(uf.relativePath);
+    }
 
-    _startElapsedTimer();
+    for (int i = 0; i < result.duplicateGroups.length; i++) {
+      final absKeep = _keeperDecisions[i] ?? result.duplicateGroups[i].suggestedKeep;
+      // Parse folder + relative_path from the absolute keeper path.
+      final (String folder, String rel) = _splitAbsPath(absKeep, _folders);
+      byFolder.putIfAbsent(folder, () => []).add(rel);
+    }
+
+    final buildFolders = byFolder.entries
+        .map((e) => V2FolderBuildCmd(folder: e.key, relativePaths: e.value))
+        .toList();
+
+    final total = byFolder.values.fold(0, (s, l) => s + l.length);
+
     setState(() {
-      _phase = _Phase.building;
-      _buildFilesTotal = totalFiles;
-      _buildFilesDone = 0;
+      _step = _Step.build;
+      _buildTotal = total;
+      _buildDone = 0;
       _targetPath = target;
       _errorMessage = null;
     });
+    _startTimer();
 
     int filesCopied = 0;
 
     await for (final event in _service.v2Build(
-      sessionId: _sessionId!,
+      sessionId: _sessionId ?? '',
       target: target,
       folders: buildFolders,
     )) {
       switch (event) {
         case ConsolidateProgress(:final filesScanned):
-          setState(() => _buildFilesDone = filesScanned);
+          setState(() => _buildDone = filesScanned);
         case ConsolidateBuildComplete(filesCopied: final n):
           filesCopied = n;
         case ConsolidateError(:final message):
-          _stopElapsedTimer();
+          _stopTimer();
           setState(() {
             _errorMessage = message;
-            _phase = _Phase.foldReview;
+            _step = _Step.review;
           });
           return;
         default:
@@ -499,57 +378,61 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       }
     }
 
-    _stopElapsedTimer();
+    _stopTimer();
     setState(() {
       _filesCopied = filesCopied;
-      _phase = _Phase.result;
+      _step = _Step.done;
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // Finalize
-  // ---------------------------------------------------------------------------
-
-  Future<void> _finalize() async {
-    final sessionId = _sessionId!;
-
-    await for (final event in _service.finalize(sessionId: sessionId)) {
-      if (event is ConsolidateError) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(event.message)),
-          );
-        }
-        return;
+  /// Given an absolute path and the list of source folders, extract the
+  /// (folder, relative_path) pair by finding which folder is a prefix.
+  (String, String) _splitAbsPath(String absPath, List<String> folders) {
+    for (final folder in folders) {
+      final prefix = folder.endsWith('/') ? folder : '$folder/';
+      if (absPath.startsWith(prefix)) {
+        return (folder, absPath.substring(prefix.length));
       }
     }
-
-    if (mounted) {
-      Navigator.of(context).pop();
-    }
+    // Fallback: treat entire path as relative to first folder.
+    return (folders.isNotEmpty ? folders.first : '', absPath);
   }
 
   // ---------------------------------------------------------------------------
-  // Formatting helpers
+  // Step-indicator widget
   // ---------------------------------------------------------------------------
 
-  String _formatSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  Widget _buildStepIndicator() {
+    final currentIndex = _Step.values.indexOf(_step);
+    return Container(
+      color: Colors.grey[50],
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+      child: Row(
+        children: List.generate(_stepLabels.length * 2 - 1, (i) {
+          if (i.isOdd) {
+            // Connector line
+            final leftStepIdx = i ~/ 2;
+            final isCompleted = leftStepIdx < currentIndex;
+            return Expanded(
+              child: Container(
+                height: 2,
+                color: isCompleted ? const Color(0xFF0E70C0) : Colors.grey[300],
+              ),
+            );
+          }
+          final idx = i ~/ 2;
+          final isCompleted = idx < currentIndex;
+          final isCurrent = idx == currentIndex;
+          return _StepDot(
+            index: idx,
+            label: _stepLabels[idx],
+            isCompleted: isCompleted,
+            isCurrent: isCurrent,
+          );
+        }),
+      ),
+    );
   }
-
-  String _shortPath(String path) {
-    final parts = path.split('/');
-    return parts.length > 3
-        ? '…/${parts.sublist(parts.length - 2).join('/')}'
-        : path;
-  }
-
-  String _leafName(String path) => path.split('/').last;
 
   // ---------------------------------------------------------------------------
   // Root build
@@ -557,32 +440,61 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isAutoStep =
+        _step == _Step.scan || _step == _Step.build;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Consolidate Folders'),
-        leading: _phase == _Phase.rationalizingFolder ||
-                _phase == _Phase.foldingFolder ||
-                _phase == _Phase.building
-            ? const SizedBox.shrink()
-            : null,
+        title: const Text('Consolidate'),
+        leading: (!isAutoStep && _step != _Step.select && _step != _Step.done)
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _handleBack,
+                tooltip: 'Back',
+              )
+            : const SizedBox.shrink(),
       ),
-      body: switch (_phase) {
-        _Phase.sourceSelection => _buildSourceSelection(),
-        _Phase.rationalizingFolder => _buildScanning('Scanning for duplicates…'),
-        _Phase.rationalizeReview => _buildRationalizeReview(),
-        _Phase.foldingFolder => _buildScanning('Finding unique files…'),
-        _Phase.foldReview => _buildFoldReview(),
-        _Phase.building => _buildBuilding(),
-        _Phase.result => _buildResult(),
-      },
+      body: Column(
+        children: [
+          _buildStepIndicator(),
+          const Divider(height: 1),
+          Expanded(child: _buildCurrentStep()),
+        ],
+      ),
     );
   }
 
+  void _handleBack() {
+    switch (_step) {
+      case _Step.filter:
+        setState(() => _step = _Step.select);
+      case _Step.scope:
+        setState(() => _step = _Step.filter);
+      case _Step.review:
+        // Allow going back to scope (will need to re-scan to change anything).
+        setState(() => _step = _Step.scope);
+      default:
+        break;
+    }
+  }
+
+  Widget _buildCurrentStep() {
+    return switch (_step) {
+      _Step.select => _buildSelectStep(),
+      _Step.filter => _buildFilterStep(),
+      _Step.scope => _buildScopeStep(),
+      _Step.scan => _buildScanStep(),
+      _Step.review => _buildReviewStep(),
+      _Step.build => _buildBuildStep(),
+      _Step.done => _buildDoneStep(),
+    };
+  }
+
   // ---------------------------------------------------------------------------
-  // Phase: source selection
+  // Step 1 — Select
   // ---------------------------------------------------------------------------
 
-  Widget _buildSourceSelection() {
+  Widget _buildSelectStep() {
     return Column(
       children: [
         Expanded(
@@ -591,21 +503,20 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (_errorMessage != null)
-                  _ErrorBanner(message: _errorMessage!),
+                if (_errorMessage != null) _ErrorBanner(message: _errorMessage!),
                 _SectionHeader(
-                  title: 'Folders',
+                  title: 'Source Folders',
                   subtitle:
-                      'Add two or more peer folders to consolidate. All are treated equally.',
+                      'Add two or more folders to consolidate. All are treated equally — no primary or secondary.',
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 ..._folders.asMap().entries.map((e) => Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: _SourceTile(
                         path: e.value,
                         label: 'Folder ${e.key + 1}',
                         color: _folderColor(e.key),
-                        onRemove: () => _removeFolder(e.key),
+                        onRemove: () => setState(() => _folders.removeAt(e.key)),
                       ),
                     )),
                 OutlinedButton.icon(
@@ -615,7 +526,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                 ),
                 const SizedBox(height: 24),
                 _SectionHeader(
-                  title: 'Output Directory',
+                  title: 'Output Folder',
                   subtitle: 'Where the consolidated folder will be created.',
                 ),
                 const SizedBox(height: 8),
@@ -642,9 +553,8 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                           border: OutlineInputBorder(),
                           isDense: true,
                         ),
-                        onChanged: (_) => setState(() {
-                          _targetManuallySet = true;
-                        }),
+                        onChanged: (_) =>
+                            setState(() => _targetManuallySet = true),
                       ),
                     ),
                   ],
@@ -663,177 +573,194 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
         ),
         _BottomBar(
           child: ElevatedButton.icon(
-            onPressed: _canStart ? _startRationalizeScan : null,
+            onPressed: (_folders.length >= 2 && _resolvedTargetPath != null)
+                ? _advanceToFilter
+                : null,
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF0E70C0),
               foregroundColor: Colors.white,
             ),
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('Start'),
+            icon: const Icon(Icons.arrow_forward),
+            label: const Text('Continue'),
           ),
         ),
       ],
     );
   }
 
-  Color _folderColor(int index) {
-    const colors = [
-      Color(0xFF0E70C0), // blue
-      Color(0xFF0A7764), // teal
-      Color(0xFF7B3FB5), // purple
-      Color(0xFFB85C00), // amber
-    ];
-    return colors[index % colors.length];
-  }
-
-  // ---------------------------------------------------------------------------
-  // Phase: scanning (both rationalize and fold)
-  // ---------------------------------------------------------------------------
-
-  Widget _buildScanning(String label) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                      fontSize: 18, fontWeight: FontWeight.w600),
-                ),
-                Text(
-                  _formatElapsed(_scanElapsed),
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w300,
-                    color: Colors.grey[600],
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Folder ${_currentFolderIndex + 1} of ${_folders.length}  •  ${_leafName(_currentFolder)}',
-              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
-            ),
-            const SizedBox(height: 16),
-            const LinearProgressIndicator(),
-            const SizedBox(height: 8),
-            if (_scanFilesCount > 0)
-              Text(
-                '$_scanFilesCount files processed',
-                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Phase: rationalize review
-  // ---------------------------------------------------------------------------
-
-  Widget _buildRationalizeReview() {
-    final folder = _currentFolder;
-    final decisions = _dupeDecisions[folder] ?? [];
-    final folderNum = _currentFolderIndex + 1;
-    final folderTotal = _folders.length;
-
-    if (decisions.isEmpty) {
-      return Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.check_circle_outline,
-                        size: 64, color: Colors.green[600]),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'No duplicates found',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'All ${_cleanFiles.length} files are unique within this folder.',
-                      style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-              ),
-            ),
+  Future<void> _addFolder() async {
+    final path = await getDirectoryPath();
+    if (path == null || path.isEmpty) return;
+    if (_isDangerousPath(path)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Please select a specific folder, not a whole drive or volume root.'),
+            duration: Duration(seconds: 4),
           ),
-          _BottomBar(
-            child: ElevatedButton.icon(
-              onPressed: _accumulateAndFoldScan,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0E70C0),
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.arrow_forward),
-              label: const Text('Continue'),
-            ),
-          ),
-        ],
-      );
+        );
+      }
+      return;
     }
+    if (_folders.contains(path)) return;
+    setState(() => _folders.add(path));
+    if (_folders.length == 1) _autoPopulateTarget(path);
+  }
+
+  Future<void> _pickTargetParent() async {
+    final path = await getDirectoryPath();
+    if (path == null || path.isEmpty) return;
+    setState(() {
+      _targetParentPath = path;
+      _targetManuallySet = true;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 2 — Filter
+  // ---------------------------------------------------------------------------
+
+  Widget _buildFilterStep() {
+    if (_isLoadingInventories) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    // Merge all extension stats across all folders.
+    final merged = <String, int>{};
+    for (final inv in _inventories.values) {
+      if (inv == null) continue;
+      for (final stat in inv.extensions) {
+        merged[stat.extension] =
+            (merged[stat.extension] ?? 0) + stat.count;
+      }
+    }
+    final sortedExts = merged.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    final maxCount =
+        sortedExts.isEmpty ? 1 : sortedExts.map((e) => e.value).reduce((a, b) => a > b ? a : b);
 
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            children: [
-              Icon(Icons.folder, size: 16, color: _folderColor(_currentFolderIndex)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Folder $folderNum of $folderTotal — ${_leafName(folder)} — Rationalize',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 14),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Text(
-                '${decisions.length} duplicate group${decisions.length == 1 ? '' : 's'}',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
         Expanded(
-          child: ListView.builder(
-            itemCount: decisions.length,
-            itemBuilder: (ctx, i) {
-              final dec = decisions[i];
-              return _DupeGroupCard(
-                decision: dec,
-                index: i,
-                formatSize: _formatSize,
-                onKeepChanged: (path) =>
-                    setState(() => dec.keepPath = path),
-              );
-            },
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _SectionHeader(
+                  title: 'Folder and File Filter',
+                  subtitle:
+                      'Choose which file types to include in the scan. Leave all unchecked to include everything.',
+                ),
+                const SizedBox(height: 12),
+                if (sortedExts.isEmpty)
+                  Text(
+                    'Could not load file type information.',
+                    style: TextStyle(color: Colors.grey[500]),
+                  )
+                else ...[
+                  // Select all / none
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: Checkbox(
+                          tristate: true,
+                          value: _includeExtensions.isEmpty
+                              ? false
+                              : _includeExtensions.length == merged.length
+                                  ? true
+                                  : null,
+                          onChanged: (_) => setState(() {
+                            if (_includeExtensions.length == merged.length) {
+                              _includeExtensions = {};
+                            } else {
+                              _includeExtensions = merged.keys.toSet();
+                            }
+                          }),
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const Text('All file types',
+                          style: TextStyle(
+                              fontWeight: FontWeight.w600, fontSize: 13)),
+                      const SizedBox(width: 8),
+                      Text(
+                        _includeExtensions.isEmpty ? '(all included)' : '',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
+                  const Divider(height: 16),
+                  ...sortedExts.map((entry) {
+                    final isSelected =
+                        _includeExtensions.contains(entry.key);
+                    final label = entry.key.isEmpty
+                        ? '(no extension)'
+                        : entry.key;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: Checkbox(
+                              value: isSelected,
+                              onChanged: (checked) => setState(() {
+                                if (checked == true) {
+                                  _includeExtensions.add(entry.key);
+                                } else {
+                                  _includeExtensions.remove(entry.key);
+                                }
+                              }),
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          SizedBox(
+                            width: 80,
+                            child: Text(
+                              label,
+                              style: const TextStyle(fontSize: 13),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: LinearProgressIndicator(
+                              value: entry.value / maxCount,
+                              backgroundColor: Colors.grey[200],
+                              color: isSelected || _includeExtensions.isEmpty
+                                  ? const Color(0xFF0E70C0)
+                                  : Colors.grey[300],
+                              minHeight: 6,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '${entry.value}',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey[600]),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ],
+            ),
           ),
         ),
         _BottomBar(
           child: ElevatedButton.icon(
-            onPressed: _accumulateAndFoldScan,
+            onPressed: _advanceToScope,
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF0E70C0),
               foregroundColor: Colors.white,
@@ -847,120 +774,131 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase: fold review
+  // Step 3 — Scope Review
   // ---------------------------------------------------------------------------
 
-  Widget _buildFoldReview() {
-    final folder = _currentFolder;
-    final items = _foldReviewItems[folder] ?? [];
-    final isLastFolder = _currentFolderIndex == _folders.length - 1;
-    final folderNum = _currentFolderIndex + 1;
-    final folderTotal = _folders.length;
-
-    final keepCount = items.where((i) => i.keep).length;
-    final skipCount = items.length - keepCount;
-    final totalBytes = items
-        .where((i) => i.keep)
-        .fold<int>(0, (s, i) => s + i.file.sizeBytes);
-
-    if (items.isEmpty) {
-      return Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.check_circle_outline,
-                        size: 64, color: Colors.green[600]),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'No unique files to fold in',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'All files from this folder are already represented.',
-                      style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          _BottomBar(
-            child: ElevatedButton.icon(
-              onPressed: _advanceToNextFolder,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0E70C0),
-                foregroundColor: Colors.white,
-              ),
-              icon: Icon(isLastFolder ? Icons.build : Icons.arrow_forward),
-              label: Text(isLastFolder ? 'Build' : 'Next Folder'),
-            ),
-          ),
-        ],
-      );
+  Widget _buildScopeStep() {
+    // Estimate total files from inventories.
+    int estimatedFiles = 0;
+    if (_includeExtensions.isEmpty) {
+      for (final inv in _inventories.values) {
+        if (inv != null) estimatedFiles += inv.totalFiles;
+      }
+    } else {
+      for (final inv in _inventories.values) {
+        if (inv == null) continue;
+        for (final stat in inv.extensions) {
+          if (_includeExtensions.contains(stat.extension)) {
+            estimatedFiles += stat.count;
+          }
+        }
+      }
     }
 
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            children: [
-              Icon(Icons.folder,
-                  size: 16, color: _folderColor(_currentFolderIndex)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Folder $folderNum of $folderTotal — ${_leafName(folder)} — Fold In',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 14),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
         Expanded(
-          child: ListView.builder(
-            itemCount: items.length,
-            itemBuilder: (ctx, i) {
-              final item = items[i];
-              return _ReviewRow(
-                item: item,
-                formatSize: _formatSize,
-                onToggle: (keep) => setState(() => item.keep = keep),
-              );
-            },
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_errorMessage != null)
+                  _ErrorBanner(message: _errorMessage!),
+                _SectionHeader(
+                  title: 'Scope Review',
+                  subtitle:
+                      'Confirm what will be scanned before starting.',
+                ),
+                const SizedBox(height: 16),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('${_folders.length} folders',
+                            style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 8),
+                        ..._folders.asMap().entries.map((e) => Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 3),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 10,
+                                    height: 10,
+                                    decoration: BoxDecoration(
+                                      color: _folderColor(e.key),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _shortPath(e.value),
+                                      style: const TextStyle(fontSize: 13),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )),
+                        const Divider(height: 24),
+                        Row(
+                          children: [
+                            _ScopeChip(
+                              label: 'Files',
+                              value: estimatedFiles > 0
+                                  ? '~$estimatedFiles'
+                                  : '—',
+                            ),
+                            const SizedBox(width: 16),
+                            _ScopeChip(
+                              label: 'Types',
+                              value: _includeExtensions.isEmpty
+                                  ? 'All'
+                                  : '${_includeExtensions.length} selected',
+                            ),
+                          ],
+                        ),
+                        const Divider(height: 24),
+                        Text(
+                          'Output: ${_resolvedTargetPath ?? '—'}',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.grey[600]),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-        _ReviewBottomBar(
-          keepCount: keepCount,
-          skipCount: skipCount,
-          totalBytes: totalBytes,
-          formatSize: _formatSize,
-          nextLabel: isLastFolder ? 'Build' : 'Next Folder',
-          onContinue: _advanceToNextFolder,
+        _BottomBar(
+          child: ElevatedButton.icon(
+            onPressed: _startScan,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0E70C0),
+              foregroundColor: Colors.white,
+            ),
+            icon: const Icon(Icons.search),
+            label: const Text('Start Scan'),
+          ),
         ),
       ],
     );
   }
 
   // ---------------------------------------------------------------------------
-  // Phase: building
+  // Step 4 — Scan (auto)
   // ---------------------------------------------------------------------------
 
-  Widget _buildBuilding() {
-    final progress =
-        _buildFilesTotal > 0 ? _buildFilesDone / _buildFilesTotal : null;
-
+  Widget _buildScanStep() {
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -973,12 +911,305 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
               crossAxisAlignment: CrossAxisAlignment.baseline,
               textBaseline: TextBaseline.alphabetic,
               children: [
-                const Text(
-                  'Building output…',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-                ),
+                const Text('Scanning…',
+                    style:
+                        TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
                 Text(
-                  _formatElapsed(_scanElapsed),
+                  _formatElapsed(_elapsed),
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w300,
+                    color: Colors.grey[600],
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_scanningSource.isNotEmpty && _scanningSource != 'unified')
+              Text(
+                _shortPath(_scanningSource),
+                style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                overflow: TextOverflow.ellipsis,
+              ),
+            const SizedBox(height: 16),
+            const LinearProgressIndicator(),
+            const SizedBox(height: 8),
+            if (_scanFilesCount > 0)
+              Text(
+                '$_scanFilesCount files hashed',
+                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 5 — Review
+  // ---------------------------------------------------------------------------
+
+  Widget _buildReviewStep() {
+    final result = _scanResult;
+    if (result == null) return const SizedBox.shrink();
+
+    final autoResolved =
+        result.duplicateGroups.where((g) => !g.ambiguous).length;
+    final ambiguous =
+        result.duplicateGroups.where((g) => g.ambiguous).length;
+
+    // Potential savings: for each duplicate group, sum (copies-1) * size.
+    int savingsBytes = 0;
+    for (final g in result.duplicateGroups) {
+      savingsBytes += g.sizeBytes * (g.paths.length - 1);
+    }
+
+    return Column(
+      children: [
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Summary card
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Wrap(
+                      spacing: 24,
+                      runSpacing: 12,
+                      alignment: WrapAlignment.spaceEvenly,
+                      children: [
+                        _SummaryChip(
+                          label: 'Total',
+                          value: '${result.totalFiles}',
+                        ),
+                        _SummaryChip(
+                          label: 'Unique',
+                          value: '${result.uniqueFiles.length}',
+                          color: Colors.green[700],
+                        ),
+                        _SummaryChip(
+                          label: 'Dup groups',
+                          value: '${result.duplicateGroups.length}',
+                          color: Colors.orange[700],
+                        ),
+                        _SummaryChip(
+                          label: 'Auto-resolved',
+                          value: '$autoResolved',
+                          color: Colors.blue[700],
+                        ),
+                        if (ambiguous > 0)
+                          _SummaryChip(
+                            label: 'Need review',
+                            value: '$ambiguous',
+                            color: Colors.red[700],
+                          ),
+                        if (savingsBytes > 0)
+                          _SummaryChip(
+                            label: 'Savings',
+                            value: _formatSize(savingsBytes),
+                            color: Colors.green[800],
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (result.duplicateGroups.isEmpty) ...[
+                  const SizedBox(height: 24),
+                  Center(
+                    child: Column(
+                      children: [
+                        Icon(Icons.check_circle_outline,
+                            size: 56, color: Colors.green[600]),
+                        const SizedBox(height: 12),
+                        const Text('No duplicates found.',
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 4),
+                        Text(
+                          'All ${result.totalFiles} files are unique.',
+                          style: TextStyle(
+                              fontSize: 13, color: Colors.grey[600]),
+                        ),
+                      ],
+                    ),
+                  ),
+                ] else ...[
+                  // Ambiguous groups — require user decision
+                  if (ambiguous > 0) ...[
+                    const SizedBox(height: 20),
+                    _SectionHeader(
+                      title: 'Needs Review ($ambiguous)',
+                      subtitle:
+                          'The ranker could not automatically pick a winner. Choose which copy to keep.',
+                    ),
+                    const SizedBox(height: 8),
+                    ...result.duplicateGroups.asMap().entries
+                        .where((e) => e.value.ambiguous)
+                        .map((e) => _buildGroupCard(e.key, e.value)),
+                  ],
+                  // Auto-resolved groups — collapsed summary
+                  if (autoResolved > 0) ...[
+                    const SizedBox(height: 20),
+                    _SectionHeader(
+                      title: 'Auto-Resolved ($autoResolved)',
+                      subtitle:
+                          'The ranker selected the best copy. Expand to review.',
+                    ),
+                    const SizedBox(height: 8),
+                    ...result.duplicateGroups.asMap().entries
+                        .where((e) => !e.value.ambiguous)
+                        .map((e) => _buildGroupCard(e.key, e.value)),
+                  ],
+                ],
+              ],
+            ),
+          ),
+        ),
+        _BottomBar(
+          child: ElevatedButton.icon(
+            onPressed: _startBuild,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.teal[700],
+              foregroundColor: Colors.white,
+            ),
+            icon: const Icon(Icons.build),
+            label: Text(ambiguous > 0
+                ? 'Build with my decisions'
+                : 'Build consolidated folder'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGroupCard(int groupIdx, UnifiedDuplicateGroup group) {
+    final chosenKeep = _keeperDecisions[groupIdx] ?? group.suggestedKeep;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ExpansionTile(
+        tilePadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        title: Row(
+          children: [
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: group.ambiguous
+                    ? Colors.red[50]
+                    : Colors.blue[50],
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                    color: group.ambiguous
+                        ? Colors.red[300]!
+                        : Colors.blue[300]!),
+              ),
+              child: Text(
+                group.ambiguous ? 'Review needed' : 'Auto',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: group.ambiguous
+                        ? Colors.red[700]
+                        : Colors.blue[700]),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _leafName(group.paths.first),
+                style: const TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w500),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Text(
+              _formatSize(group.sizeBytes),
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+          ],
+        ),
+        initiallyExpanded: group.ambiguous,
+        children: group.paths.map((absPath) {
+          final isChosen = absPath == chosenKeep;
+          return InkWell(
+            onTap: () => setState(() => _keeperDecisions[groupIdx] = absPath),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  Radio<String>(
+                    value: absPath,
+                    groupValue: chosenKeep,
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() => _keeperDecisions[groupIdx] = val);
+                      }
+                    },
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _shortPath(absPath),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: isChosen
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (group.reasons.isNotEmpty && isChosen)
+                          Text(
+                            group.reasons.join(', '),
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.grey[500]),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 6 — Build (auto)
+  // ---------------------------------------------------------------------------
+
+  Widget _buildBuildStep() {
+    final fraction =
+        _buildTotal > 0 ? _buildDone / _buildTotal : null;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                const Text('Building…',
+                    style: TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w600)),
+                Text(
+                  _formatElapsed(_elapsed),
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.w300,
@@ -989,21 +1220,14 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
               ],
             ),
             const SizedBox(height: 16),
-            LinearProgressIndicator(value: progress),
+            LinearProgressIndicator(value: fraction),
             const SizedBox(height: 8),
             Text(
-              _buildFilesTotal > 0
-                  ? 'Copying $_buildFilesDone / $_buildFilesTotal files'
-                  : 'Starting…',
-              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+              _buildTotal > 0
+                  ? '$_buildDone / $_buildTotal files copied'
+                  : 'Copying files…',
+              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
             ),
-            if (_targetPath != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '→ ${_shortPath(_targetPath!)}',
-                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-              ),
-            ],
           ],
         ),
       ),
@@ -1011,150 +1235,133 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase: result
+  // Step 7 — Done
   // ---------------------------------------------------------------------------
 
-  Widget _buildResult() {
-    return Column(
-      children: [
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _ResultHeader(
-                  filesCopied: _filesCopied,
-                  targetPath: _targetPath,
-                  shortPath: _shortPath,
-                ),
-                const SizedBox(height: 24),
-                for (final folder in _folders) ...[
-                  _ResultFolderCard(
-                    folder: folder,
-                    foldItems: _foldReviewItems[folder] ?? [],
-                    leafName: _leafName,
-                    formatSize: _formatSize,
-                  ),
-                  const SizedBox(height: 8),
-                ],
-              ],
+  Widget _buildDoneStep() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check_circle, size: 72, color: Colors.green[600]),
+            const SizedBox(height: 20),
+            const Text(
+              'Done',
+              style:
+                  TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
-          ),
-        ),
-        _BottomBar(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ElevatedButton.icon(
-                onPressed: _finalize,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green[700],
-                  foregroundColor: Colors.white,
-                ),
-                icon: const Icon(Icons.check),
-                label: const Text('Finalize — Mark Session Complete'),
-              ),
+            const SizedBox(height: 8),
+            Text(
+              '$_filesCopied files copied',
+              style:
+                  TextStyle(fontSize: 16, color: Colors.grey[700]),
+            ),
+            if (_targetPath != null) ...[
               const SizedBox(height: 8),
               Text(
-                'Finalizing records this session in the registry so you can '
-                'safely verify before deleting source directories.',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                _targetPath!,
+                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
                 textAlign: TextAlign.center,
               ),
             ],
-          ),
+            const SizedBox(height: 32),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_targetPath != null)
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        Process.run('open', [_targetPath!]),
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('Open Folder'),
+                  ),
+                const SizedBox(width: 16),
+                ElevatedButton(
+                  onPressed: _resetToStart,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0E70C0),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Consolidate Again'),
+                ),
+              ],
+            ),
+          ],
         ),
-      ],
+      ),
     );
+  }
+
+  void _resetToStart() {
+    setState(() {
+      _step = _Step.select;
+      _folders.clear();
+      _targetParentPath = null;
+      _targetNameController.clear();
+      _targetManuallySet = false;
+      _inventories = {};
+      _includeExtensions = {};
+      _scanResult = null;
+      _sessionId = null;
+      _filesCopied = 0;
+      _targetPath = null;
+      _errorMessage = null;
+    });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Small reusable widgets
+// Shared sub-widgets
 // ---------------------------------------------------------------------------
 
-class _DupeGroupCard extends StatelessWidget {
-  final _DupeGroupDecision decision;
+class _StepDot extends StatelessWidget {
   final int index;
-  final String Function(int) formatSize;
-  final void Function(String) onKeepChanged;
+  final String label;
+  final bool isCompleted;
+  final bool isCurrent;
 
-  const _DupeGroupCard({
-    required this.decision,
+  const _StepDot({
     required this.index,
-    required this.formatSize,
-    required this.onKeepChanged,
+    required this.label,
+    required this.isCompleted,
+    required this.isCurrent,
   });
 
   @override
   Widget build(BuildContext context) {
-    final group = decision.group;
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  'Duplicate group ${index + 1}',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 13),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  formatSize(group.sizeBytes),
-                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                ),
-                if (group.ambiguous) ...[
-                  const SizedBox(width: 8),
-                  Icon(Icons.warning_amber, size: 14, color: Colors.orange[700]),
-                  const SizedBox(width: 2),
-                  Text(
-                    'ambiguous',
-                    style:
-                        TextStyle(fontSize: 11, color: Colors.orange[700]),
+    const activeColor = Color(0xFF0E70C0);
+    final bg = isCompleted || isCurrent ? activeColor : Colors.grey[300]!;
+    final fg = isCompleted || isCurrent ? Colors.white : Colors.grey[600]!;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
+          child: Center(
+            child: isCompleted
+                ? const Icon(Icons.check, size: 16, color: Colors.white)
+                : Text(
+                    '${index + 1}',
+                    style: TextStyle(
+                        fontSize: 12, color: fg, fontWeight: FontWeight.bold),
                   ),
-                ],
-              ],
-            ),
-            if (group.reasons.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                group.reasons.join(' • '),
-                style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-              ),
-            ],
-            const SizedBox(height: 8),
-            RadioGroup<String>(
-              groupValue: decision.keepPath,
-              onChanged: (v) {
-                if (v != null) onKeepChanged(v);
-              },
-              child: Column(
-                children: [
-                  for (final path in group.paths)
-                    ListTile(
-                      dense: true,
-                      leading: Radio<String>(value: path),
-                      title: Text(
-                        path,
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      trailing: decision.keepPath == path
-                          ? Icon(Icons.star, size: 14, color: Colors.blue[700])
-                          : const SizedBox(width: 14),
-                      onTap: () => onKeepChanged(path),
-                    ),
-                ],
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            color: isCurrent ? activeColor : Colors.grey[500],
+            fontWeight: isCurrent ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1171,9 +1378,11 @@ class _SectionHeader extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(title,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 2),
-        Text(subtitle, style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+            style:
+                const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        Text(subtitle,
+            style: TextStyle(fontSize: 13, color: Colors.grey[600])),
       ],
     );
   }
@@ -1192,45 +1401,70 @@ class _SourceTile extends StatelessWidget {
     required this.onRemove,
   });
 
-  String get _leafName => path.split('/').last;
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+        borderRadius: BorderRadius.circular(8),
+        color: color.withValues(alpha: 0.04),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            margin: const EdgeInsets.only(right: 10),
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: color)),
+              const SizedBox(height: 2),
+              Text(
+                path,
+                style: const TextStyle(fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+          const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.close, size: 16),
+            onPressed: onRemove,
+            tooltip: 'Remove',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            color: Colors.grey[500],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BottomBar extends StatelessWidget {
+  final Widget child;
+
+  const _BottomBar({required this.child});
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: color.withAlpha(30),
-          child: Icon(Icons.folder, color: color, size: 20),
-        ),
-        title: Text(_leafName,
-            style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text(
-          path,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 12),
-        ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: color.withAlpha(20),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(label,
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: color,
-                      fontWeight: FontWeight.w600)),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close, size: 18),
-              onPressed: onRemove,
-              tooltip: 'Remove',
-            ),
-          ],
-        ),
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        border: Border(top: BorderSide(color: Colors.grey[200]!)),
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [child],
       ),
     );
   }
@@ -1257,253 +1491,61 @@ class _ErrorBanner extends StatelessWidget {
           Icon(Icons.error_outline, color: Colors.red[700], size: 18),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(message,
-                style: TextStyle(color: Colors.red[800], fontSize: 13)),
-          ),
+              child: Text(message,
+                  style: TextStyle(color: Colors.red[800], fontSize: 13))),
         ],
       ),
     );
   }
 }
 
-class _BottomBar extends StatelessWidget {
-  final Widget child;
+class _ScopeChip extends StatelessWidget {
+  final String label;
+  final String value;
 
-  const _BottomBar({required this.child});
+  const _ScopeChip({required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-      decoration: BoxDecoration(
-        color: Theme.of(context).scaffoldBackgroundColor,
-        border: Border(top: BorderSide(color: Colors.grey[200]!)),
-      ),
-      child: SizedBox(
-        width: double.infinity,
-        child: child,
-      ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(value,
+            style: const TextStyle(
+                fontSize: 18, fontWeight: FontWeight.bold)),
+        Text(label,
+            style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+      ],
     );
   }
 }
 
-class _ReviewRow extends StatelessWidget {
-  final _ReviewItem item;
-  final String Function(int) formatSize;
-  final void Function(bool) onToggle;
+class _SummaryChip extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color? color;
 
-  const _ReviewRow({
-    required this.item,
-    required this.formatSize,
-    required this.onToggle,
-  });
+  const _SummaryChip(
+      {required this.label, required this.value, this.color});
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      dense: true,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-      leading: Icon(
-        Icons.insert_drive_file,
-        size: 18,
-        color: item.keep ? Colors.blue[700] : Colors.grey[400],
-      ),
-      title: Text(
-        item.file.relativePath,
-        style: TextStyle(
-          fontSize: 13,
-          color: item.keep ? null : Colors.grey[400],
-          decoration: item.keep ? null : TextDecoration.lineThrough,
-        ),
-      ),
-      subtitle: item.file.sizeBytes > 0
-          ? Text(
-              formatSize(item.file.sizeBytes),
-              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-            )
-          : null,
-      trailing: Switch(
-        value: item.keep,
-        onChanged: onToggle,
-      ),
-    );
-  }
-}
-
-class _ReviewBottomBar extends StatelessWidget {
-  final int keepCount;
-  final int skipCount;
-  final int totalBytes;
-  final String Function(int) formatSize;
-  final String nextLabel;
-  final VoidCallback? onContinue;
-
-  const _ReviewBottomBar({
-    required this.keepCount,
-    required this.skipCount,
-    required this.totalBytes,
-    required this.formatSize,
-    required this.nextLabel,
-    required this.onContinue,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-      decoration: BoxDecoration(
-        color: Theme.of(context).scaffoldBackgroundColor,
-        border: Border(top: BorderSide(color: Colors.grey[200]!)),
-      ),
+    return SizedBox(
+      width: 110,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                '$keepCount to fold in  •  ${formatSize(totalBytes)}',
-                style:
-                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-              ),
-              if (skipCount > 0)
-                Text(
-                  '$skipCount skipped',
-                  style: TextStyle(fontSize: 13, color: Colors.grey[600]),
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: onContinue,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0E70C0),
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.arrow_forward),
-              label: Text(nextLabel),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ResultHeader extends StatelessWidget {
-  final int filesCopied;
-  final String? targetPath;
-  final String Function(String) shortPath;
-
-  const _ResultHeader({
-    required this.filesCopied,
-    required this.targetPath,
-    required this.shortPath,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: Colors.green[50],
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(color: Colors.green[200]!),
-      ),
-      elevation: 0,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.green[700], size: 20),
-                const SizedBox(width: 8),
-                Text(
-                  'Build complete',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.green[800],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '$filesCopied file${filesCopied == 1 ? '' : 's'} copied',
+          Text(value,
               style: TextStyle(
-                  fontSize: 22,
+                  fontSize: 20,
                   fontWeight: FontWeight.bold,
-                  color: Colors.green[700]),
-            ),
-            if (targetPath != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '→ ${shortPath(targetPath!)}',
-                style: TextStyle(fontSize: 12, color: Colors.green[800]),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ResultFolderCard extends StatelessWidget {
-  final String folder;
-  final List<_ReviewItem> foldItems;
-  final String Function(String) leafName;
-  final String Function(int) formatSize;
-
-  const _ResultFolderCard({
-    required this.folder,
-    required this.foldItems,
-    required this.leafName,
-    required this.formatSize,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final kept = foldItems.where((i) => i.keep).length;
-    final skipped = foldItems.where((i) => !i.keep).length;
-
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.folder, size: 16, color: Colors.teal[700]),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    leafName(folder),
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 16,
-              children: [
-                Text('$kept folded in',
-                    style: TextStyle(fontSize: 13, color: Colors.green[700])),
-                if (skipped > 0)
-                  Text('$skipped skipped',
-                      style:
-                          TextStyle(fontSize: 13, color: Colors.grey[600])),
-              ],
-            ),
-          ],
-        ),
+                  color: color)),
+          const SizedBox(height: 2),
+          Text(label,
+              style: const TextStyle(fontSize: 12),
+              textAlign: TextAlign.center),
+        ],
       ),
     );
   }

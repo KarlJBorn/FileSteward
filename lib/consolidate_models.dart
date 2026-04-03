@@ -207,6 +207,86 @@ class ConsolidateAccumulateComplete extends ConsolidateEvent {
       );
 }
 
+// ---------------------------------------------------------------------------
+// v3 event types — unified scan model
+// ---------------------------------------------------------------------------
+
+/// A file that appears in exactly one source folder.
+class UnifiedFileEntry {
+  final String folder;
+  final String relativePath;
+  final String sha256;
+  final int sizeBytes;
+
+  UnifiedFileEntry({
+    required this.folder,
+    required this.relativePath,
+    required this.sha256,
+    required this.sizeBytes,
+  });
+
+  factory UnifiedFileEntry.fromJson(Map<String, dynamic> json) =>
+      UnifiedFileEntry(
+        folder: json['folder'] as String,
+        relativePath: json['relative_path'] as String,
+        sha256: json['sha256'] as String,
+        sizeBytes: (json['size_bytes'] as num).toInt(),
+      );
+}
+
+/// A group of files with identical content (absolute paths).
+class UnifiedDuplicateGroup {
+  final List<String> paths;
+  final String suggestedKeep;
+  final List<String> reasons;
+  final bool ambiguous;
+  final int sizeBytes;
+
+  UnifiedDuplicateGroup({
+    required this.paths,
+    required this.suggestedKeep,
+    required this.reasons,
+    required this.ambiguous,
+    required this.sizeBytes,
+  });
+
+  factory UnifiedDuplicateGroup.fromJson(Map<String, dynamic> json) =>
+      UnifiedDuplicateGroup(
+        paths: (json['paths'] as List<dynamic>).cast<String>(),
+        suggestedKeep: json['suggested_keep'] as String,
+        reasons: (json['reasons'] as List<dynamic>).cast<String>(),
+        ambiguous: json['ambiguous'] as bool,
+        sizeBytes: (json['size_bytes'] as num).toInt(),
+      );
+}
+
+class ConsolidateUnifiedScanComplete extends ConsolidateEvent {
+  final String sessionId;
+  final int totalFiles;
+  final List<UnifiedFileEntry> uniqueFiles;
+  final List<UnifiedDuplicateGroup> duplicateGroups;
+
+  ConsolidateUnifiedScanComplete({
+    required this.sessionId,
+    required this.totalFiles,
+    required this.uniqueFiles,
+    required this.duplicateGroups,
+  });
+
+  factory ConsolidateUnifiedScanComplete.fromJson(Map<String, dynamic> json) =>
+      ConsolidateUnifiedScanComplete(
+        sessionId: json['session_id'] as String,
+        totalFiles: (json['total_files'] as num).toInt(),
+        uniqueFiles: (json['unique_files'] as List<dynamic>)
+            .map((e) => UnifiedFileEntry.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        duplicateGroups: (json['duplicate_groups'] as List<dynamic>)
+            .map((e) =>
+                UnifiedDuplicateGroup.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 ConsolidateEvent? parseConsolidateEvent(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   return switch (type) {
@@ -223,6 +303,8 @@ ConsolidateEvent? parseConsolidateEvent(Map<String, dynamic> json) {
       ConsolidateFoldScanComplete.fromJson(json),
     'consolidate_accumulate_complete' =>
       ConsolidateAccumulateComplete.fromJson(json),
+    'consolidate_unified_scan_complete' =>
+      ConsolidateUnifiedScanComplete.fromJson(json),
     _ => null,
   };
 }

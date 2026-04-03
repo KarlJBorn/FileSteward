@@ -159,6 +159,29 @@ class ConsolidateService {
   }
 
   // ---------------------------------------------------------------------------
+  // v3: Unified scan
+  // ---------------------------------------------------------------------------
+
+  /// Hash all files across all [folders] simultaneously, group by content
+  /// hash, and return unique files plus duplicate groups. Optionally filter
+  /// by [includeExtensions] (lowercase with leading dot, e.g. [".jpg"]).
+  Stream<ConsolidateEvent> unifiedScan({
+    required String sessionId,
+    required List<String> folders,
+    required String target,
+    List<String> includeExtensions = const [],
+  }) {
+    final cmd = {
+      'command': 'consolidate_unified_scan',
+      'session_id': sessionId,
+      'folders': folders,
+      'target': target,
+      'include_extensions': includeExtensions,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
 
