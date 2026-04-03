@@ -146,34 +146,29 @@ Done:
   folder-level keep/discard decision, not individual file decisions)
 - These issues drive the Iteration 7 redesign
 
-### Iteration 7 — UX Redesign: Navigation, Wayfinding, and Consolidate Review Model
+### Iteration 7 — Pure Consolidate App: 7-Step UX Redesign (current — PR #117)
 
-**Two parallel tracks:**
+**Key decisions (agreed 2026-04-03):**
+- FileSteward Consolidate is a standalone app — Maintain/Rationalize stripped out entirely
+- "Rationalize" is NOT used inside Consolidate; that step is "Folder and File Filter"
+- Stepper navigation replaces ad-hoc phase headers and breadcrumbs
+- Unified scan across all folders simultaneously (not per-folder sequential loop)
+- Review starts with a summary card; only ambiguous groups require user input
+- Pattern recognition: after user resolves ambiguous cases, app detects emerging rules
+  and shows proposed bulk decisions for confirmation
+- Help system scaffold: ? button on every step opens contextual help drawer
 
-**Track A — App-wide UI/UX review**
-The app has accumulated screens and navigation patterns iteration by iteration without a
-coherent overall model. Before adding more features, conduct a full UI review:
-- Map all screens and flows (Rationalize + Consolidate end to end)
-- Define a consistent navigation model (forward/back/cancel, destructive vs recoverable)
-- Improve wayfinding — user should always know where they are, what's next, what was done
-- Ensure Rationalize and Consolidate feel like the same app
-- Review home screen entry point clarity
+**Issues:** #110 (strip Maintain), #111 (stepper), #112 (Folder and File Filter),
+#113 (Scope Review), #114 (Review step), #115 (Rust unified scan), #116 (help scaffold),
+#87 (ranker refinement), #38 (multi-folder picker), #101 (test corpus)
 
-**Track B — Consolidate review model redesign**
-Replace the per-folder flat file list with a smarter unified model:
-- Unified scan across all folders at once (single Rust command, not per-folder loop)
-- Folder similarity scoring: detect when two folders share high content overlap and offer
-  a folder-level keep/discard decision before file-level review
-- Penalty ranker auto-resolves clear duplicate cases silently
-- Ambiguous duplicates (equal score) surfaced for user input
-- Scope selection before hashing: folder tree with checkboxes to exclude dirs/file types
-- Unique files review only shows the meaningful delta
-
-Reusable pieces identified:
-- Rust: all hash/walk/diff/penalty functions, v2_build, accumulate
-- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen (for scope selection)
-- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard from rationalize_screen (for ambiguous groups)
-- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding, _buildResult
+**Reusable pieces carried forward:**
+- Rust: hash_file, walk_files, should_skip_dir/file, collect_hashes, penalty_score,
+  v2_build, accumulate
+- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel → Folder and File Filter tree
+- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard → ambiguous groups review
+- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding,
+  _buildResult → carry forward unchanged
 
 ### Iteration 8 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
