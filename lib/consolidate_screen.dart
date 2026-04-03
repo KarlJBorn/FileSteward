@@ -34,6 +34,26 @@ const _stepLabels = [
 ];
 
 // ---------------------------------------------------------------------------
+// Important file extensions — pre-selected by default in the Filter step.
+// Empty _includeExtensions means "include everything"; this set seeds the
+// initial selection with the types most likely to matter for consolidation.
+// A future Settings screen will let users add to or modify this list.
+// ---------------------------------------------------------------------------
+
+const Set<String> _kImportantExtensions = {
+  // Photos
+  '.jpg', '.jpeg', '.png', '.heic', '.heif',
+  '.tiff', '.tif', '.raw', '.cr2', '.nef', '.bmp', '.gif', '.webp',
+  // Video
+  '.mp4', '.mov', '.avi', '.mkv', '.m4v', '.wmv', '.m2ts', '.3gp',
+  // Audio
+  '.mp3', '.m4a', '.aac', '.flac', '.wav', '.aiff', '.ogg',
+  // Documents
+  '.doc', '.docx', '.pdf', '.txt', '.rtf', '.odt', '.pages',
+  '.xls', '.xlsx', '.csv', '.numbers', '.ppt', '.pptx', '.key',
+};
+
+// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -215,9 +235,22 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     }
 
     if (mounted) {
+      // Pre-select extensions that are both important AND present in these folders.
+      final present = <String>{};
+      for (final inv in results.values) {
+        if (inv == null) continue;
+        for (final stat in inv.extensions) {
+          present.add(stat.extension);
+        }
+      }
+      final preselected = present.intersection(_kImportantExtensions);
+
       setState(() {
         _inventories = results;
         _isLoadingInventories = false;
+        // If any important types are present, pre-select them.
+        // If the folders contain only non-important types, default to all.
+        _includeExtensions = preselected.isNotEmpty ? preselected : {};
       });
     }
   }
@@ -652,7 +685,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                 _SectionHeader(
                   title: 'Folder and File Filter',
                   subtitle:
-                      'Choose which file types to include in the scan. Leave all unchecked to include everything.',
+                      'Common media and document types are pre-selected. Uncheck any you want to exclude, or check additional types.',
                 ),
                 const SizedBox(height: 12),
                 if (sortedExts.isEmpty)
