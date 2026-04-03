@@ -27,11 +27,12 @@
 /// ```json
 /// { "command": "consolidate_finalize", "session_id": "2026-04-01T15-00-00" }
 /// ```
+use crate::rationalize::penalty_score;
 use hex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,13 @@ struct SessionRecord {
     primary: String,
     status: String,
     secondaries: Vec<SecondaryRecord>,
+    /// All content hashes approved into the target so far (across all folded folders).
+    /// Persisted so fold scans for subsequent folders can diff against this set.
+    #[serde(default)]
+    accumulated_hashes: Vec<String>,
+    /// Folders in processing order (Iteration 6 peer model).
+    #[serde(default)]
+    folders: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,10 +95,16 @@ struct Registry {
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum ConsolidateCommand {
+    // v1 commands (primary/secondary model)
     ConsolidateScan(ScanCmd),
     ConsolidateBuild(BuildCmd),
     ConsolidateFinalize(FinalizeCmd),
     ConsolidateLoad(LoadCmd),
+    // v2 commands (peer-folder model)
+    ConsolidateRationalizeScan(RationalizeScanCmd),
+    ConsolidateFoldScan(FoldScanCmd),
+    ConsolidateAccumulate(AccumulateCmd),
+    ConsolidateV2Build(V2BuildCmd),
 }
 
 #[derive(Deserialize)]
@@ -127,6 +141,53 @@ struct BuildCmd {
 #[derive(Deserialize)]
 struct FinalizeCmd {
     session_id: String,
+}
+
+// v2 command structs --------------------------------------------------------
+
+/// Scan one folder for internal duplicates. Returns duplicate groups (ranked)
+/// plus the list of non-duplicate files.
+#[derive(Deserialize)]
+struct RationalizeScanCmd {
+    session_id: String,
+    folder: String,
+}
+
+/// Compare one folder against the session's accumulated hashes. Returns files
+/// whose content is not yet in the accumulated base.
+#[derive(Deserialize)]
+struct FoldScanCmd {
+    session_id: String,
+    folder: String,
+}
+
+/// Record approved hashes into the session's accumulated set after user review.
+#[derive(Deserialize)]
+struct AccumulateCmd {
+    session_id: String,
+    /// Content hashes of all files the user approved to keep/fold in.
+    approved_hashes: Vec<String>,
+    /// Folders list — full ordered list of folders for this session.
+    #[serde(default)]
+    folders: Vec<String>,
+    /// Target directory path.
+    #[serde(default)]
+    target: String,
+}
+
+/// Build the target by copying all approved files from all folders.
+#[derive(Deserialize)]
+struct V2FolderBuild {
+    folder: String,
+    /// Relative paths to copy from this folder.
+    relative_paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct V2BuildCmd {
+    session_id: String,
+    target: String,
+    folders: Vec<V2FolderBuild>,
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +547,47 @@ fn diff_secondary(
 }
 
 // ---------------------------------------------------------------------------
+// v2 output event types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ConsolidateDuplicateGroup {
+    paths: Vec<String>,
+    suggested_keep: String,
+    reasons: Vec<String>,
+    ambiguous: bool,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ConsolidateRationalizeScanComplete {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    session_id: String,
+    folder: String,
+    duplicate_groups: Vec<ConsolidateDuplicateGroup>,
+    clean_files: Vec<UniqueFile>,
+    system_files_skipped: usize,
+}
+
+#[derive(Serialize)]
+struct ConsolidateFoldScanComplete {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    session_id: String,
+    folder: String,
+    unique_files: Vec<UniqueFile>,
+}
+
+#[derive(Serialize)]
+struct ConsolidateAccumulateComplete {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    session_id: String,
+    accumulated_count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Command handlers
 // ---------------------------------------------------------------------------
 
@@ -561,6 +663,8 @@ fn handle_scan(cmd: ScanCmd) {
         primary: cmd.primary.clone(),
         status: "in_progress".to_string(),
         secondaries: registry_secondaries,
+        accumulated_hashes: vec![],
+        folders: vec![],
     });
     save_registry(&registry);
 
@@ -715,6 +819,318 @@ fn handle_load(cmd: LoadCmd) {
 }
 
 // ---------------------------------------------------------------------------
+// v2 handlers
+// ---------------------------------------------------------------------------
+
+/// Hash every file in [root] in parallel, returning (relative_path, hash, size).
+fn hash_all_files(root: &Path) -> Vec<(String, Option<String>, u64)> {
+    let files = walk_files(root);
+    files
+        .par_iter()
+        .map(|p| {
+            let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let hash = hash_file(p);
+            let rel = p.strip_prefix(root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (rel, hash, size)
+        })
+        .collect()
+}
+
+fn handle_rationalize_scan(cmd: RationalizeScanCmd) {
+    let folder_path = PathBuf::from(&cmd.folder);
+    if !folder_path.is_dir() {
+        emit_error(&format!("Folder not found: {}", cmd.folder));
+        return;
+    }
+
+    // Generate or reuse session id.
+    let session_id = if cmd.session_id.is_empty() {
+        session_id_from_iso(&now_iso())
+    } else {
+        cmd.session_id.clone()
+    };
+
+    // Emit starting progress.
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: cmd.folder.clone(),
+        files_scanned: 0,
+    });
+
+    let all_files = hash_all_files(&folder_path);
+    let total = all_files.len();
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: cmd.folder.clone(),
+        files_scanned: total,
+    });
+
+    // Group by hash to find duplicates.
+    let mut by_hash: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+    for (rel, hash_opt, size) in &all_files {
+        if let Some(h) = hash_opt {
+            by_hash.entry(h.clone()).or_default().push((rel.clone(), *size));
+        }
+    }
+
+    let mut duplicate_groups: Vec<ConsolidateDuplicateGroup> = Vec::new();
+    let mut dupe_paths: HashSet<String> = HashSet::new();
+
+    for (_hash, entries) in &by_hash {
+        if entries.len() < 2 {
+            continue;
+        }
+
+        // Score each path; pick the lowest (best) scoring one.
+        let scored: Vec<(u32, Vec<String>, &String, u64)> = entries
+            .iter()
+            .map(|(rel, sz)| {
+                let (score, reasons) = penalty_score(rel);
+                (score, reasons, rel, *sz)
+            })
+            .collect();
+
+        let min_score = scored.iter().map(|(s, _, _, _)| *s).min().unwrap_or(0);
+        let candidates: Vec<_> = scored.iter().filter(|(s, _, _, _)| *s == min_score).collect();
+        let (suggested_keep, reasons, ambiguous) = if candidates.len() == 1 {
+            let (_, _reasons, rel, _) = candidates[0];
+            // Produce positive reasons from the losers' reasons.
+            let positive_reasons: Vec<String> = scored
+                .iter()
+                .filter(|(_, _, r, _)| *r != candidates[0].2)
+                .flat_map(|(_, rs, _, _)| rs.iter().cloned())
+                .collect();
+            ((*rel).clone(), positive_reasons, false)
+        } else {
+            // Still tied — pick alphabetically as a stable fallback, mark ambiguous.
+            let mut alpha_candidates: Vec<&String> = candidates.iter().map(|(_, _, r, _)| *r).collect();
+            alpha_candidates.sort();
+            (alpha_candidates[0].clone(), vec![], true)
+        };
+
+        let size_bytes = entries[0].1;
+        let paths: Vec<String> = entries.iter().map(|(r, _)| r.clone()).collect();
+        for p in &paths {
+            dupe_paths.insert(p.clone());
+        }
+        duplicate_groups.push(ConsolidateDuplicateGroup {
+            paths,
+            suggested_keep,
+            reasons,
+            ambiguous,
+            size_bytes,
+        });
+    }
+
+    // Files not in any duplicate group.
+    let clean_files: Vec<UniqueFile> = all_files
+        .iter()
+        .filter(|(rel, hash_opt, _)| !dupe_paths.contains(rel) && hash_opt.is_some())
+        .map(|(rel, _, size)| UniqueFile {
+            relative_path: rel.clone(),
+            size_bytes: *size,
+        })
+        .collect();
+
+    // Save session to registry.
+    let mut registry = load_registry();
+    let existing = registry.sessions.iter().find(|s| s.id == session_id).cloned();
+    let mut folders = existing.as_ref().map(|s| s.folders.clone()).unwrap_or_default();
+    if !folders.contains(&cmd.folder) {
+        folders.push(cmd.folder.clone());
+    }
+    let accumulated_hashes = existing.as_ref().map(|s| s.accumulated_hashes.clone()).unwrap_or_default();
+    upsert_session(&mut registry, SessionRecord {
+        id: session_id.clone(),
+        created: existing.map(|s| s.created).unwrap_or_else(|| now_iso()),
+        target: String::new(),
+        primary: String::new(),
+        status: "in_progress".to_string(),
+        secondaries: vec![],
+        accumulated_hashes,
+        folders,
+    });
+    save_registry(&registry);
+
+    emit(&ConsolidateRationalizeScanComplete {
+        event_type: "consolidate_rationalize_scan_complete",
+        session_id,
+        folder: cmd.folder.clone(),
+        duplicate_groups,
+        clean_files,
+        system_files_skipped: 0,
+    });
+}
+
+fn handle_fold_scan(cmd: FoldScanCmd) {
+    let folder_path = PathBuf::from(&cmd.folder);
+    if !folder_path.is_dir() {
+        emit_error(&format!("Folder not found: {}", cmd.folder));
+        return;
+    }
+
+    // Load accumulated hashes from session.
+    let registry = load_registry();
+    let accumulated: HashSet<String> = registry.sessions
+        .iter()
+        .find(|s| s.id == cmd.session_id)
+        .map(|s| s.accumulated_hashes.iter().cloned().collect())
+        .unwrap_or_default();
+
+    // Also build a size set for quick filtering.
+    let accumulated_sizes: HashSet<u64> = HashSet::new(); // no size prefilter needed without primary sizes
+
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: cmd.folder.clone(),
+        files_scanned: 0,
+    });
+
+    let all_files = hash_all_files(&folder_path);
+
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: cmd.folder.clone(),
+        files_scanned: all_files.len(),
+    });
+
+    let _ = accumulated_sizes; // suppress unused warning
+
+    let unique_files: Vec<UniqueFile> = all_files
+        .into_iter()
+        .filter(|(_, hash_opt, _)| {
+            hash_opt.as_ref().map(|h| !accumulated.contains(h)).unwrap_or(false)
+        })
+        .map(|(rel, _, size)| UniqueFile { relative_path: rel, size_bytes: size })
+        .collect();
+
+    emit(&ConsolidateFoldScanComplete {
+        event_type: "consolidate_fold_scan_complete",
+        session_id: cmd.session_id,
+        folder: cmd.folder,
+        unique_files,
+    });
+}
+
+fn handle_accumulate(cmd: AccumulateCmd) {
+    let mut registry = load_registry();
+    let session_opt = registry.sessions.iter_mut().find(|s| s.id == cmd.session_id);
+
+    let mut accumulated: Vec<String>;
+    let mut folders: Vec<String>;
+    let mut target: String;
+    let id: String;
+    let created: String;
+    let status: String;
+
+    if let Some(session) = session_opt {
+        accumulated = session.accumulated_hashes.clone();
+        folders = session.folders.clone();
+        target = session.target.clone();
+        id = session.id.clone();
+        created = session.created.clone();
+        status = session.status.clone();
+    } else {
+        // New session.
+        let now = now_iso();
+        id = session_id_from_iso(&now);
+        created = now;
+        accumulated = vec![];
+        folders = vec![];
+        target = String::new();
+        status = "in_progress".to_string();
+    }
+
+    // Add approved hashes, deduplicating.
+    let existing_set: HashSet<String> = accumulated.iter().cloned().collect();
+    for h in cmd.approved_hashes {
+        if !existing_set.contains(&h) {
+            accumulated.push(h);
+        }
+    }
+
+    if !cmd.folders.is_empty() {
+        folders = cmd.folders;
+    }
+    if !cmd.target.is_empty() {
+        target = cmd.target;
+    }
+
+    let accumulated_count = accumulated.len();
+
+    upsert_session(&mut registry, SessionRecord {
+        id: id.clone(),
+        created,
+        target,
+        primary: String::new(),
+        status,
+        secondaries: vec![],
+        accumulated_hashes: accumulated,
+        folders,
+    });
+    save_registry(&registry);
+
+    emit(&ConsolidateAccumulateComplete {
+        event_type: "consolidate_accumulate_complete",
+        session_id: id,
+        accumulated_count,
+    });
+}
+
+fn handle_v2_build(cmd: V2BuildCmd) {
+    let target = PathBuf::from(&cmd.target);
+    if let Err(e) = fs::create_dir_all(&target) {
+        emit_error(&format!("Failed to create target directory: {}", e));
+        return;
+    }
+
+    let mut files_copied = 0usize;
+
+    for folder_build in &cmd.folders {
+        let folder_path = PathBuf::from(&folder_build.folder);
+        for rel in &folder_build.relative_paths {
+            let src = folder_path.join(rel);
+            let dst = target.join(rel);
+            if let Some(parent) = dst.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            match fs::copy(&src, &dst) {
+                Ok(_) => {
+                    files_copied += 1;
+                    if files_copied % 10 == 0 {
+                        emit(&ConsolidateProgressEvent {
+                            event_type: "consolidate_progress",
+                            source: cmd.target.clone(),
+                            files_scanned: files_copied,
+                        });
+                    }
+                }
+                Err(e) => {
+                    emit_error(&format!("Failed to copy {}: {}", rel, e));
+                }
+            }
+        }
+    }
+
+    // Update session in registry.
+    let mut registry = load_registry();
+    if let Some(session) = registry.sessions.iter_mut().find(|s| s.id == cmd.session_id) {
+        session.status = "complete".to_string();
+        session.target = cmd.target.clone();
+    }
+    save_registry(&registry);
+
+    emit(&ConsolidateBuildComplete {
+        event_type: "consolidate_build_complete",
+        session_id: cmd.session_id.clone(),
+        target: cmd.target.clone(),
+        files_copied,
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Stdin dispatch — called from main.rs
 // ---------------------------------------------------------------------------
 
@@ -729,6 +1145,98 @@ pub fn run_from_stdin() {
         Ok(ConsolidateCommand::ConsolidateBuild(cmd)) => handle_build(cmd),
         Ok(ConsolidateCommand::ConsolidateFinalize(cmd)) => handle_finalize(cmd),
         Ok(ConsolidateCommand::ConsolidateLoad(cmd)) => handle_load(cmd),
+        Ok(ConsolidateCommand::ConsolidateRationalizeScan(cmd)) => handle_rationalize_scan(cmd),
+        Ok(ConsolidateCommand::ConsolidateFoldScan(cmd)) => handle_fold_scan(cmd),
+        Ok(ConsolidateCommand::ConsolidateAccumulate(cmd)) => handle_accumulate(cmd),
+        Ok(ConsolidateCommand::ConsolidateV2Build(cmd)) => handle_v2_build(cmd),
         Err(e) => emit_error(&format!("Failed to parse consolidate command: {}", e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn write_file(dir: &Path, rel: &str, content: &[u8]) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(content).unwrap();
+    }
+
+    #[test]
+    fn test_handle_rationalize_scan_detects_duplicates() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Two identical files (same content = same hash = duplicate).
+        let content = b"hello duplicate world";
+        write_file(root, "alpha/file.txt", content);
+        write_file(root, "beta/file.txt", content);
+
+        // One unique file.
+        write_file(root, "gamma/unique.txt", b"unique content here");
+
+        // Use a temp registry path so we don't pollute the real one.
+        let reg_dir = TempDir::new().unwrap();
+        let reg_path = reg_dir.path().join("sessions.json");
+        // SAFETY: test binary is single-threaded for env mutation purposes.
+        unsafe { std::env::set_var("FILESTEWARD_REGISTRY_PATH", &reg_path) };
+
+        let cmd = RationalizeScanCmd {
+            session_id: String::new(),
+            folder: root.to_string_lossy().to_string(),
+        };
+
+        // Capture stdout to parse the output event.
+        // Since emit() writes to real stdout, we test indirectly through
+        // the internal logic.
+        let all_files = hash_all_files(root);
+        assert_eq!(all_files.len(), 3);
+
+        let mut by_hash: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+        for (rel, hash_opt, size) in &all_files {
+            if let Some(h) = hash_opt {
+                by_hash.entry(h.clone()).or_default().push((rel.clone(), *size));
+            }
+        }
+
+        let dupe_groups: Vec<_> = by_hash.values().filter(|g| g.len() >= 2).collect();
+        assert_eq!(dupe_groups.len(), 1, "Expected exactly 1 duplicate group");
+
+        let group = &dupe_groups[0];
+        assert_eq!(group.len(), 2, "Duplicate group should have 2 entries");
+
+        // Both paths should be the two file.txt copies.
+        let paths: Vec<&str> = group.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(paths.iter().any(|p| p.contains("alpha")));
+        assert!(paths.iter().any(|p| p.contains("beta")));
+
+        // Verify penalty_score picks one of them as suggested_keep.
+        let (score_a, _) = penalty_score("alpha/file.txt");
+        let (score_b, _) = penalty_score("beta/file.txt");
+        // Both should have equal scores (same depth, no copy artifacts).
+        assert_eq!(score_a, score_b);
+
+        // Run the full handler to verify it saves a session.
+        handle_rationalize_scan(cmd);
+        let registry = load_registry();
+        assert!(
+            !registry.sessions.is_empty(),
+            "A session should have been saved"
+        );
+        let session = &registry.sessions[0];
+        assert_eq!(session.status, "in_progress");
+
+        // SAFETY: test binary is single-threaded for env mutation purposes.
+        unsafe { std::env::remove_var("FILESTEWARD_REGISTRY_PATH") };
     }
 }

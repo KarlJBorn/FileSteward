@@ -153,7 +153,7 @@ const COPY_ARTIFACT_PATTERNS: &[&str] = &[
 /// Returns `(score, reasons)` where `reasons` explains the penalties found.
 /// Reasons are phrased negatively (why this copy is worse) so the caller
 /// can build a positive explanation for the winner.
-fn penalty_score(rel_path: &str) -> (u32, Vec<String>) {
+pub fn penalty_score(rel_path: &str) -> (u32, Vec<String>) {
     let mut score = 0u32;
     let mut reasons: Vec<String> = Vec::new();
 
