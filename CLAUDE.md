@@ -125,50 +125,62 @@ Done:
 - Rust binary bundled inside .app via Xcode Run Script build phase
 - Rust binary resolved from bundle-sibling path (`Contents/MacOS/rust_core`)
 
-### Iteration 6 — Consolidate v2: Per-Folder Orchestrated Rationalize + Fold
-**Goal:** Replace the primary/secondary model with a peer-folder workflow that produces a
-fully deduplicated canonical output from N source directories.
+### Iteration 6 — Consolidate v2: Per-Folder Orchestrated Rationalize + Fold ✅ Complete (v0.5.9)
 
-**Design (agreed 2026-04-02):**
+Done:
+- Peer-folder model replacing primary/secondary (Folder 1/2/3)
+- `consolidate_rationalize_scan` — walks one folder, detects internal duplicate groups,
+  ranks with penalty scorer, flags ambiguous cases
+- `consolidate_fold_scan` — diffs one folder against session's accumulated hash set
+- `consolidate_accumulate` — persists approved hashes to session registry after each review
+- `consolidate_v2_build` — copies all approved files from all folders into target
+- `penalty_score` in rationalize.rs made pub for reuse in consolidate.rs
+- SessionRecord gains `accumulated_hashes` + `folders` fields (backward-compatible)
+- Dart models, service methods, and screen redesigned for per-folder phase loop
+- Rust test: duplicate detection verified with temp fixture
 
-All folders are peers — no primary/secondary distinction. The workflow is an orchestrated
-two-step applied to each folder in sequence:
+**Note:** Review UX revealed as insufficient during testing (2026-04-03):
+- Fold review shows all files from Folder 1 (4484 files) because target starts empty — not useful
+- File-by-file review is unworkable at scale
+- Directory-level duplicate grouping needed (two folders with same content should offer a
+  folder-level keep/discard decision, not individual file decisions)
+- These issues drive the Iteration 7 redesign
 
-1. **Rationalize** — scan the folder for internal duplicates, system files, and unwanted
-   directories. User reviews and approves what to keep. Ignore rules apply here.
-2. **Fold in** — compare the rationalized folder against the accumulated target (everything
-   approved so far). Surface unique files. User reviews and approves what to add.
+### Iteration 7 — UX Redesign: Navigation, Wayfinding, and Consolidate Review Model
 
-The target folder starts empty. Folder 1's entire approved content becomes the initial base.
-Each subsequent folder contributes only what the target doesn't already have (by content hash).
-The result is one clean directory with no duplicates from any source.
+**Two parallel tracks:**
 
-Order matters only for path conflicts: when the same content appears in multiple folders at
-different relative paths, whichever folder is processed first wins the path in the target.
+**Track A — App-wide UI/UX review**
+The app has accumulated screens and navigation patterns iteration by iteration without a
+coherent overall model. Before adding more features, conduct a full UI review:
+- Map all screens and flows (Rationalize + Consolidate end to end)
+- Define a consistent navigation model (forward/back/cancel, destructive vs recoverable)
+- Improve wayfinding — user should always know where they are, what's next, what was done
+- Ensure Rationalize and Consolidate feel like the same app
+- Review home screen entry point clarity
 
-**Work required:**
+**Track B — Consolidate review model redesign**
+Replace the per-folder flat file list with a smarter unified model:
+- Unified scan across all folders at once (single Rust command, not per-folder loop)
+- Folder similarity scoring: detect when two folders share high content overlap and offer
+  a folder-level keep/discard decision before file-level review
+- Penalty ranker auto-resolves clear duplicate cases silently
+- Ambiguous duplicates (equal score) surfaced for user input
+- Scope selection before hashing: folder tree with checkboxes to exclude dirs/file types
+- Unique files review only shows the meaningful delta
 
-Rust:
-- New `consolidate_rationalize_scan` command — walk one folder, return internal duplicate
-  groups, system files, and ignore-matched paths (reuses rationalize.rs logic)
-- Modified `consolidate_fold_scan` command — compare one folder against an accumulated hash
-  set passed in (or stored in the session registry), return unique files
-- Session registry tracks accumulated hashes so fold scans compose correctly across folders
+Reusable pieces identified:
+- Rust: all hash/walk/diff/penalty functions, v2_build, accumulate
+- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen (for scope selection)
+- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard from rationalize_screen (for ambiguous groups)
+- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding, _buildResult
 
-Dart:
-- New event models for rationalize scan results (duplicate groups, system files)
-- Consolidate screen redesigned with per-folder phase sequence:
-  sourceSelection → [for each folder: rationalizeScan → rationalizeReview → foldScan →
-  foldReview] → building → result
-- Drop "Primary / Secondary" labels; use "Folder 1 / 2 / 3"
-- Ignore-directory input per folder (or shared across all)
-
-### Iteration 7 — iPad/iPhone Review Client
+### Iteration 8 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
 
-### Iteration 8 — Advanced UX + Performance
+### Iteration 9 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
 - Performance tuning for large external drives (100k+ files)
 - Rules engine: user-defined naming and placement rules
