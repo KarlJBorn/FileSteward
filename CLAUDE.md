@@ -170,12 +170,56 @@ Done:
 - Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding,
   _buildResult → carry forward unchanged
 
-### Iteration 8 — iPad/iPhone Review Client
+### Iteration 8 — Two-Panel Tree View (agreed 2026-04-03)
+
+**Cut line from Iteration 7:** The two-panel layout materially changes the
+build step (Dart must translate folder-level include/exclude decisions into
+the build command), so it is cleanly deferred here.
+
+**Step 2 (Folder and File Filter) — pre-scan, two-panel:**
+- Left panel: N source folder trees, color-coded (colors from Step 1),
+  lazy expansion (walk one level on tap, like Finder — never load full tree
+  upfront)
+- Right panel: naive merged target — ordered combination of all source
+  folders, duplicate paths flagged, ambiguities indicated; also lazy
+- Extension checkbox screen is REMOVED; filtering moves into the tree via
+  right-click context menu (see below)
+- No hashing at this step — directory walk only
+
+**Step 5 (Review) — post-scan, two-panel:**
+- Left panel: source trees, color-coded, annotated (duplicate markers,
+  provenance dots, which copy was kept)
+- Right panel: final view of expected consolidated, deduped target tree —
+  interactive at folder level (include/exclude per folder), read-only at
+  file level in this iteration
+- OS folder name mapping applied silently (macOS table: My Pictures →
+  Pictures, My Documents → Documents, My Videos → Movies, My Music →
+  Music); mapping shown as unobtrusive annotation; mechanism for
+  questioning/overriding a mapping is TBD (UI only, Rust unchanged)
+- Folder-level decisions drive exactly what the Build step executes
+
+**Right-click context menu (both panels):**
+- "Exclude this file" — removes one file from target
+- "Exclude all [.ext] files" — removes that file type from target scope
+- Language is always "Exclude", never "Delete" (safety-first principle)
+- Long-press equivalent for future iPad/iPhone
+
+**Reusable pieces:**
+- _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen.dart
+- v2_build Rust command unchanged; Dart side adds folder-level decision
+  tracking
+
+**Parked / TBD:**
+- Visual treatment for "questionable" OS name mapping override link
+- File-level override interactions (later pass)
+- Settings table for user-customisable important-extensions list
+
+### Iteration 9 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
 
-### Iteration 9 — Advanced UX + Performance
+### Iteration 10 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
 - Performance tuning for large external drives (100k+ files)
 - Rules engine: user-defined naming and placement rules
@@ -200,6 +244,30 @@ Done:
 
 The Xcode project includes a "Copy Rust Binary" Run Script build phase that copies the debug
 (or release if available) Rust binary into `Contents/MacOS/` on every `flutter build macos`.
+
+## Working Patterns
+
+**Design before branch.** No branch is opened and no code is written until the flow for
+that iteration is fully agreed and documented in CLAUDE.md. The sequence is:
+1. Use case and scenarios — understand the real problem
+2. Step sequence — agree the user-facing flow end to end
+3. Terminology — lock down names before they get baked into code
+4. Edge cases — work through the hard cases in conversation, not in code
+5. Document in CLAUDE.md — the agreed design is the source of truth
+6. Open issues — one per logical unit of work
+7. Open draft PR — then write code
+
+Skipping steps 1–5 and going straight to code is hacking. Both parties are responsible
+for enforcing this. If implementation starts before the design is clear, stop and design.
+
+**Bump patch version** on every UI change Karl needs to review
+(e.g. 0.5.8 → 0.5.9). Update `lib/app_version.dart` and `pubspec.yaml`.
+
+**Merge main before starting.** Always pull main onto the feature branch before
+beginning new work.
+
+**No subagents for design decisions.** Subagents can implement agreed designs but must
+not make product or UX decisions autonomously.
 
 ## Key Files
 
