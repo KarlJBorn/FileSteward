@@ -82,6 +82,83 @@ class ConsolidateService {
   }
 
   // ---------------------------------------------------------------------------
+  // v2: Rationalize scan
+  // ---------------------------------------------------------------------------
+
+  /// Walk [folder] and find internal duplicates. Pass empty [sessionId] to
+  /// create a new session; the response will contain the assigned ID.
+  Stream<ConsolidateEvent> rationalizeScan({
+    required String sessionId,
+    required String folder,
+  }) {
+    final cmd = {
+      'command': 'consolidate_rationalize_scan',
+      'session_id': sessionId,
+      'folder': folder,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
+  // v2: Fold scan
+  // ---------------------------------------------------------------------------
+
+  /// Walk [folder] and find files not already in the session's accumulated
+  /// hashes.
+  Stream<ConsolidateEvent> foldScan({
+    required String sessionId,
+    required String folder,
+  }) {
+    final cmd = {
+      'command': 'consolidate_fold_scan',
+      'session_id': sessionId,
+      'folder': folder,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
+  // v2: Accumulate
+  // ---------------------------------------------------------------------------
+
+  /// Record [approvedHashes] into the session's accumulated set. Optionally
+  /// update [folders] and [target].
+  Stream<ConsolidateEvent> accumulate({
+    required String sessionId,
+    required List<String> approvedHashes,
+    List<String> folders = const [],
+    String target = '',
+  }) {
+    final cmd = {
+      'command': 'consolidate_accumulate',
+      'session_id': sessionId,
+      'approved_hashes': approvedHashes,
+      'folders': folders,
+      'target': target,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
+  // v2: Build
+  // ---------------------------------------------------------------------------
+
+  /// Copy files from each folder into [target] using [folders] approvals.
+  Stream<ConsolidateEvent> v2Build({
+    required String sessionId,
+    required String target,
+    required List<V2FolderBuildCmd> folders,
+  }) {
+    final cmd = {
+      'command': 'consolidate_v2_build',
+      'session_id': sessionId,
+      'target': target,
+      'folders': folders.map((f) => f.toJson()).toList(),
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
 
