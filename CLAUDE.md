@@ -154,14 +154,21 @@ Done:
 - "Rationalize" = scope selection (browse folder tree, exclude junk dirs/file types, no hashing)
 - "Consolidate" = the full workflow: rationalize all folders → scan → review → build
 
+**App architecture (agreed 2026-04-03):**
+FileSteward Consolidate is a standalone app. The Maintain/Rationalize screen has been
+stripped out entirely. "Rationalize" is NOT a term used inside Consolidate — it belongs
+to the Maintain app. The scope-definition step inside Consolidate is called
+"Folder and File Filter." Maintain will be a separate app sharing the Rust engine.
+
 **Agreed 7-step Consolidate workflow:**
 
-1. **Select folders** — add N backup folders (no primary/secondary), set target directory
-2. **Rationalize** — one folder at a time: quick inventory scan (no hashing), show folder tree
-   with checkboxes, system/junk dirs auto-excluded by default, file type filter panel.
-   User carves out irrelevant directories (Windows system, Temp, etc.)
-3. **Scope summary** — per-folder file counts + total size across all folders; chance to go
-   back and adjust any folder's scope before committing to the hash scan
+1. **Select** — add N source folders, set target directory, confirm
+2. **Folder and File Filter** — one source folder at a time: quick inventory scan (no
+   hashing), show folder tree with checkboxes, system/junk dirs auto-excluded by default,
+   file type filter shows only unusual types not in the default known-types list.
+   User removes directories and file types they don't want consolidated.
+3. **Scope Review** — per-folder file counts + total size; chance to go back and adjust
+   any folder's filter before committing to the hash scan
 4. **Scan** — hash all in-scope files across all folders simultaneously (progress + timer)
 5. **Review** — summary card first:
    - "X files will be copied to target"
@@ -170,8 +177,16 @@ Done:
    - "W unique files from folders with no overlap"
    Only ambiguous groups require user decisions. Auto-resolved and unique files visible
    but collapsed — user can expand to inspect or override.
+   Pattern recognition: after user resolves ambiguous cases, app detects if a rule
+   applies to remaining groups and shows proposed decisions for bulk confirmation.
 6. **Build** — copy approved files to target preserving source structure (progress + timer)
 7. **Done** — stats, open target folder button
+
+**Navigation model:**
+- Stepper pattern: always-visible step indicator showing current step and progress
+- Back navigation available at every step except after Build
+- No phase labels in content headers — wayfinding comes from the stepper only
+- System/junk dirs auto-excluded everywhere by default
 
 **Folder matching across sources:**
 Folders are matched (treated as the same logical folder) at two levels:
