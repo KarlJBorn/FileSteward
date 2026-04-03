@@ -201,9 +201,25 @@ the build command), so it is cleanly deferred here.
   questioning/overriding a mapping is TBD (UI only, Rust unchanged)
 - Folder-level decisions drive exactly what the Build step executes
 
+**Folder exclusion:**
+- Checkbox next to each folder node in the right panel; checked = included,
+  unchecked = excluded — no toggles, no color-only states
+- Excluding a folder is absolute: nothing from it reaches the target
+- Step 2 exclusions affect the target only; the scan (Step 4) still hashes
+  everything — exclusions are applied when building, not when scanning
+- Step 5 right panel uses the same checkbox model
+
+**Duplicate path indicator (Step 2 right panel):**
+- Each file appears exactly once in the merged target tree
+- A small colored dot per source that contributed that file sits beside it
+- One dot = unique to one source; two or more dots = duplicate, will need
+  resolution in Step 5
+- Dot colors match the source folder colors from Step 1
+
 **Right-click context menu (both panels):**
 - "Exclude this file" — removes one file from target
 - "Exclude all [.ext] files" — removes that file type from target scope
+- Right-clicking a folder node: "Exclude this folder" — unchecks it
 - Language is always "Exclude", never "Delete" (safety-first principle)
 - Long-press equivalent for future iPad/iPhone
 
