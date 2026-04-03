@@ -146,29 +146,32 @@ Done:
   folder-level keep/discard decision, not individual file decisions)
 - These issues drive the Iteration 7 redesign
 
-### Iteration 7 — Pure Consolidate App: 7-Step UX Redesign (current — PR #117)
+### Iteration 7 — Pure Consolidate App: 7-Step UX Redesign ✅ Complete (v0.6.1)
 
-**Key decisions (agreed 2026-04-03):**
-- FileSteward Consolidate is a standalone app — Maintain/Rationalize stripped out entirely
-- "Rationalize" is NOT used inside Consolidate; that step is "Folder and File Filter"
-- Stepper navigation replaces ad-hoc phase headers and breadcrumbs
-- Unified scan across all folders simultaneously (not per-folder sequential loop)
-- Review starts with a summary card; only ambiguous groups require user input
-- Pattern recognition: after user resolves ambiguous cases, app detects emerging rules
-  and shows proposed bulk decisions for confirmation
-- Help system scaffold: ? button on every step opens contextual help drawer
+**Delivered:**
+- FileSteward Consolidate is a standalone app — Maintain/Rationalize stripped (#110)
+- 7-step stepper: Select → Filter → Scope → Scan → Review → Build → Done (#111)
+- Folder and File Filter: extension checkboxes, pre-selected important types (#112)
+- Scope Review: summary card before scan (#113)
+- Review: summary chips + duplicate group cards, ambiguous groups expanded (#114)
+- Rust consolidate_unified_scan: hashes all folders in one pass, groups by
+  content hash, absolute paths, penalty-score ranking (#115)
+- Important-extensions constant (_kImportantExtensions): photos, video, audio,
+  documents pre-selected by default; falls back to all if none present
 
-**Issues:** #110 (strip Maintain), #111 (stepper), #112 (Folder and File Filter),
-#113 (Scope Review), #114 (Review step), #115 (Rust unified scan), #116 (help scaffold),
-#87 (ranker refinement), #38 (multi-folder picker), #101 (test corpus)
+**Deferred to Iteration 8:**
+- #116 help scaffold (? button per step — purely additive, scope closed cleanly)
+- #87 ranker refinement
+- #38 multi-folder picker
+- #101 test corpus
+- Two-panel tree view (Step 2 + Step 5) — designed, documented above
 
-**Reusable pieces carried forward:**
+**Reusable pieces for Iteration 8:**
 - Rust: hash_file, walk_files, should_skip_dir/file, collect_hashes, penalty_score,
-  v2_build, accumulate
-- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel → Folder and File Filter tree
-- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard → ambiguous groups review
-- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding,
-  _buildResult → carry forward unchanged
+  v2_build, accumulate, consolidate_unified_scan
+- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel → two-panel tree view
+- Dart: _StepDot, _SectionHeader, _SourceTile, _BottomBar, _ErrorBanner,
+  _ScopeChip, _SummaryChip → carry forward unchanged
 
 ### Iteration 8 — Two-Panel Tree View (agreed 2026-04-03)
 
