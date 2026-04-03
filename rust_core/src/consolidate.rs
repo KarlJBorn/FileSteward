@@ -27,11 +27,12 @@
 /// ```json
 /// { "command": "consolidate_finalize", "session_id": "2026-04-01T15-00-00" }
 /// ```
+use crate::rationalize::penalty_score;
 use hex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,13 @@ struct SessionRecord {
     primary: String,
     status: String,
     secondaries: Vec<SecondaryRecord>,
+    /// All content hashes approved into the target so far (across all folded folders).
+    /// Persisted so fold scans for subsequent folders can diff against this set.
+    #[serde(default)]
+    accumulated_hashes: Vec<String>,
+    /// Folders in processing order (Iteration 6 peer model).
+    #[serde(default)]
+    folders: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,10 +95,16 @@ struct Registry {
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum ConsolidateCommand {
+    // v1 commands (primary/secondary model)
     ConsolidateScan(ScanCmd),
     ConsolidateBuild(BuildCmd),
     ConsolidateFinalize(FinalizeCmd),
     ConsolidateLoad(LoadCmd),
+    // v2 commands (peer-folder model)
+    ConsolidateRationalizeScan(RationalizeScanCmd),
+    ConsolidateFoldScan(FoldScanCmd),
+    ConsolidateAccumulate(AccumulateCmd),
+    ConsolidateV2Build(V2BuildCmd),
 }
 
 #[derive(Deserialize)]
@@ -127,6 +141,53 @@ struct BuildCmd {
 #[derive(Deserialize)]
 struct FinalizeCmd {
     session_id: String,
+}
+
+// v2 command structs --------------------------------------------------------
+
+/// Scan one folder for internal duplicates. Returns duplicate groups (ranked)
+/// plus the list of non-duplicate files.
+#[derive(Deserialize)]
+struct RationalizeScanCmd {
+    session_id: String,
+    folder: String,
+}
+
+/// Compare one folder against the session's accumulated hashes. Returns files
+/// whose content is not yet in the accumulated base.
+#[derive(Deserialize)]
+struct FoldScanCmd {
+    session_id: String,
+    folder: String,
+}
+
+/// Record approved hashes into the session's accumulated set after user review.
+#[derive(Deserialize)]
+struct AccumulateCmd {
+    session_id: String,
+    /// Content hashes of all files the user approved to keep/fold in.
+    approved_hashes: Vec<String>,
+    /// Folders list — full ordered list of folders for this session.
+    #[serde(default)]
+    folders: Vec<String>,
+    /// Target directory path.
+    #[serde(default)]
+    target: String,
+}
+
+/// Build the target by copying all approved files from all folders.
+#[derive(Deserialize)]
+struct V2FolderBuild {
+    folder: String,
+    /// Relative paths to copy from this folder.
+    relative_paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct V2BuildCmd {
+    session_id: String,
+    target: String,
+    folders: Vec<V2FolderBuild>,
 }
 
 // ---------------------------------------------------------------------------

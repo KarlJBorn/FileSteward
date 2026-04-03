@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FileSteward — Duplicate UI Mockups</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1E1E1E; color: #CCCCCC; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 12px; }
+
+  .nav { display: flex; gap: 2px; padding: 12px 16px; background: #252526; border-bottom: 1px solid #3E3E42; }
+  .nav button { background: #3E3E42; color: #CCCCCC; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .nav button.active { background: #0E70C0; color: white; }
+
+  .screen { display: none; height: calc(100vh - 45px); flex-direction: column; }
+  .screen.active { display: flex; }
+
+  /* App bar */
+  .appbar { height: 40px; background: #252526; border-bottom: 1px solid #3E3E42; display: flex; align-items: center; padding: 0 16px; font-size: 14px; font-weight: 500; gap: 12px; }
+  .appbar .back { color: #858585; cursor: pointer; }
+
+  /* Main content */
+  .panels { display: flex; flex: 1; overflow: hidden; }
+  .panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .panel + .panel { border-left: 1px solid #3E3E42; }
+  .panel-header { padding: 8px 12px; border-bottom: 1px solid #3E3E42; font-weight: 600; font-size: 11px; color: #CCCCCC; display: flex; justify-content: space-between; }
+  .panel-header span { color: #858585; font-weight: 400; }
+  .panel-body { flex: 1; overflow-y: auto; }
+
+  /* Tree rows */
+  .row { height: 22px; display: flex; align-items: center; padding-right: 8px; cursor: pointer; white-space: nowrap; }
+  .row:hover { background: rgba(14,112,192,0.1); }
+  .row.focused { background: rgba(14,112,192,0.2); }
+  .row .icon { margin-right: 6px; font-size: 11px; flex-shrink: 0; }
+  .row .label { overflow: hidden; text-overflow: ellipsis; }
+  .row.remove { color: #CD3131; }
+  .row.rename { color: #CCA700; }
+  .row.file { color: #858585; }
+  .row.dup-file { color: #CD3131; }
+  .row.dup-badge { background: rgba(205,49,49,0.08); }
+
+  /* Depth indents */
+  .d0 { padding-left: 12px; }
+  .d1 { padding-left: 28px; }
+  .d2 { padding-left: 44px; }
+  .d3 { padding-left: 60px; }
+
+  /* Badges */
+  .badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 6px; flex-shrink: 0; }
+  .badge.dup { background: rgba(205,49,49,0.2); color: #CD3131; }
+  .badge.empty { background: rgba(205,49,49,0.2); color: #CD3131; }
+  .badge.naming { background: rgba(204,167,0,0.2); color: #CCA700; }
+  .badge.keep { background: rgba(22,130,93,0.2); color: #16825D; }
+
+  /* Bottom bar */
+  .bottombar { height: 44px; background: #252526; border-top: 1px solid #3E3E42; display: flex; align-items: center; padding: 0 16px; gap: 12px; }
+  .bottombar .status { color: #858585; font-size: 12px; flex: 1; }
+  .btn { padding: 6px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px; }
+  .btn.primary { background: #0E70C0; color: white; }
+  .btn.secondary { background: #3E3E42; color: #CCCCCC; }
+  .btn.success { background: #16825D; color: white; }
+
+  /* Option 2 — split panel */
+  .panels-split { display: flex; flex: 1; overflow: hidden; flex-direction: column; }
+  .tree-row { display: flex; flex: 1; overflow: hidden; border-bottom: 1px solid #3E3E42; }
+  .dup-section { height: 220px; display: flex; flex-direction: column; }
+  .dup-section .panel-header { background: #252526; }
+  .dup-groups { display: flex; flex: 1; overflow-x: auto; gap: 1px; background: #3E3E42; }
+  .dup-group { width: 220px; flex-shrink: 0; background: #252526; display: flex; flex-direction: column; }
+  .dup-group-header { padding: 6px 10px; border-bottom: 1px solid #3E3E42; color: #CD3131; font-weight: 600; font-size: 11px; }
+  .dup-group-header span { color: #858585; font-weight: 400; }
+  .dup-file-row { padding: 4px 10px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid #3E3E42; }
+  .dup-file-row:hover { background: rgba(14,112,192,0.1); }
+  .dup-file-row .path { color: #858585; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dup-file-row .name { color: #CCCCCC; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dup-file-row .action { margin-left: auto; flex-shrink: 0; }
+  .dup-file-row.kept .name { color: #16825D; }
+  .dup-file-row.removed .name { color: #CD3131; text-decoration: line-through; }
+  .pill { padding: 2px 7px; border-radius: 10px; font-size: 10px; border: none; cursor: pointer; }
+  .pill.keep { background: rgba(22,130,93,0.2); color: #16825D; }
+  .pill.remove { background: rgba(205,49,49,0.2); color: #CD3131; }
+
+  .divider-v { width: 1px; background: #3E3E42; }
+
+  .label-note { font-size: 11px; color: #858585; padding: 4px 12px 0; }
+  h2 { font-size: 13px; font-weight: 600; color: #CCCCCC; padding: 12px 16px 4px; }
+  .subtitle { font-size: 11px; color: #858585; padding: 0 16px 12px; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <button class="active" onclick="show('opt1')">Option A — Inline in tree</button>
+  <button onclick="show('opt2')">Option B — Separate section</button>
+</div>
+
+<!-- OPTION A: Inline in tree -->
+<div id="opt1" class="screen active">
+  <div class="appbar">
+    <span class="back">←</span>
+    My Photos
+  </div>
+  <div class="panels">
+    <!-- Original -->
+    <div class="panel">
+      <div class="panel-header">Original <span>8 folders · 14 files</span></div>
+      <div class="panel-body">
+        <div class="row d0"><span class="icon">📁</span><span class="label">Family</span></div>
+        <div class="row d1 rename"><span class="icon">📁</span><span class="label">born_family_photos</span><span class="badge naming">naming</span></div>
+        <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0042.jpg</span></div>
+        <div class="row d2 dup-file dup-badge focused"><span class="icon">📄</span><span class="label">IMG_0055.jpg</span><span class="badge dup">2 copies</span></div>
+        <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0061.jpg</span></div>
+        <div class="row d1 remove"><span class="icon">📁</span><span class="label">Duplicates</span><span class="badge empty">empty</span></div>
+        <div class="row d0"><span class="icon">📁</span><span class="label">Holidays</span></div>
+        <div class="row d1 file"><span class="icon">📄</span><span class="label">christmas_2019.jpg</span></div>
+        <div class="row d1 dup-file dup-badge"><span class="icon">📄</span><span class="label">IMG_0055.jpg</span><span class="badge dup">2 copies</span></div>
+        <div class="row d0 remove"><span class="icon">📁</span><span class="label">Temp</span><span class="badge empty">empty</span></div>
+        <div class="row d0"><span class="icon">📁</span><span class="label">Videos</span></div>
+        <div class="row d1 file"><span class="icon">📄</span><span class="label">birthday_2022.mov</span></div>
+      </div>
+    </div>
+
+    <div class="divider-v"></div>
+
+    <!-- Target -->
+    <div class="panel">
+      <div class="panel-header">Target <span>6 folders · 11 files</span></div>
+      <div class="panel-body">
+        <div class="row d0"><span class="icon">📁</span><span class="label">Family</span></div>
+        <div class="row d1" style="color:#89D185;font-style:italic"><span class="icon">📁</span><span class="label">Born Family Photos</span></div>
+        <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0042.jpg</span></div>
+        <div class="row d2 file" style="color:#16825D"><span class="icon">📄</span><span class="label">IMG_0055.jpg</span><span class="badge keep">kept</span></div>
+        <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0061.jpg</span></div>
+        <div class="row d0"><span class="icon">📁</span><span class="label">Holidays</span></div>
+        <div class="row d1 file"><span class="icon">📄</span><span class="label">christmas_2019.jpg</span></div>
+        <div class="row d0"><span class="icon">📁</span><span class="label">Videos</span></div>
+        <div class="row d1 file"><span class="icon">📄</span><span class="label">birthday_2022.mov</span></div>
+        <div class="label-note" style="padding-top:12px">Duplicate removed: Holidays/IMG_0055.jpg</div>
+      </div>
+    </div>
+  </div>
+  <div class="bottombar">
+    <span class="status">3 changes pending · 1 duplicate group</span>
+    <button class="btn primary">Apply 3 Changes</button>
+  </div>
+</div>
+
+<!-- OPTION B: Separate section -->
+<div id="opt2" class="screen">
+  <div class="appbar">
+    <span class="back">←</span>
+    My Photos
+  </div>
+  <div class="panels-split">
+    <div class="tree-row">
+      <!-- Original -->
+      <div class="panel">
+        <div class="panel-header">Original <span>8 folders · 14 files</span></div>
+        <div class="panel-body">
+          <div class="row d0"><span class="icon">📁</span><span class="label">Family</span></div>
+          <div class="row d1 rename"><span class="icon">📁</span><span class="label">born_family_photos</span><span class="badge naming">naming</span></div>
+          <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0042.jpg</span></div>
+          <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0055.jpg</span></div>
+          <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0061.jpg</span></div>
+          <div class="row d1 remove"><span class="icon">📁</span><span class="label">Duplicates</span><span class="badge empty">empty</span></div>
+          <div class="row d0"><span class="icon">📁</span><span class="label">Holidays</span></div>
+          <div class="row d1 file"><span class="icon">📄</span><span class="label">christmas_2019.jpg</span></div>
+          <div class="row d1 file"><span class="icon">📄</span><span class="label">IMG_0055.jpg</span></div>
+          <div class="row d0 remove"><span class="icon">📁</span><span class="label">Temp</span><span class="badge empty">empty</span></div>
+          <div class="row d0"><span class="icon">📁</span><span class="label">Videos</span></div>
+          <div class="row d1 file"><span class="icon">📄</span><span class="label">birthday_2022.mov</span></div>
+        </div>
+      </div>
+      <div class="divider-v"></div>
+      <!-- Target -->
+      <div class="panel">
+        <div class="panel-header">Target <span>6 folders · 11 files</span></div>
+        <div class="panel-body">
+          <div class="row d0"><span class="icon">📁</span><span class="label">Family</span></div>
+          <div class="row d1" style="color:#89D185;font-style:italic"><span class="icon">📁</span><span class="label">Born Family Photos</span></div>
+          <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0042.jpg</span></div>
+          <div class="row d2 file" style="color:#16825D"><span class="icon">📄</span><span class="label">IMG_0055.jpg</span><span class="badge keep">kept</span></div>
+          <div class="row d2 file"><span class="icon">📄</span><span class="label">IMG_0061.jpg</span></div>
+          <div class="row d0"><span class="icon">📁</span><span class="label">Holidays</span></div>
+          <div class="row d1 file"><span class="icon">📄</span><span class="label">christmas_2019.jpg</span></div>
+          <div class="row d0"><span class="icon">📁</span><span class="label">Videos</span></div>
+          <div class="row d1 file"><span class="icon">📄</span><span class="label">birthday_2022.mov</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Duplicate groups section -->
+    <div class="dup-section">
+      <div class="panel-header" style="background:#252526">
+        Duplicate Files
+        <span>2 groups · 3 files · could remove 2</span>
+      </div>
+      <div class="dup-groups">
+        <div class="dup-group">
+          <div class="dup-group-header">Group 1 <span>· 2 copies · 3.2 MB each</span></div>
+          <div class="dup-file-row kept">
+            <div>
+              <div class="name">IMG_0055.jpg</div>
+              <div class="path">Family/born_family_photos/</div>
+            </div>
+            <div class="action"><button class="pill keep">keep ✓</button></div>
+          </div>
+          <div class="dup-file-row removed">
+            <div>
+              <div class="name">IMG_0055.jpg</div>
+              <div class="path">Holidays/</div>
+            </div>
+            <div class="action"><button class="pill remove">remove</button></div>
+          </div>
+        </div>
+        <div class="dup-group">
+          <div class="dup-group-header">Group 2 <span>· 2 copies · 8.1 MB each</span></div>
+          <div class="dup-file-row">
+            <div>
+              <div class="name">christmas_2019.jpg</div>
+              <div class="path">Holidays/</div>
+            </div>
+            <div class="action"><button class="pill keep">keep</button></div>
+          </div>
+          <div class="dup-file-row">
+            <div>
+              <div class="name">xmas2019.jpg</div>
+              <div class="path">Family/born_family_photos/</div>
+            </div>
+            <div class="action"><button class="pill remove">remove</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bottombar">
+    <span class="status">3 folder changes · 1 duplicate resolved · 1 pending</span>
+    <button class="btn primary">Apply Changes</button>
+  </div>
+</div>
+
+<script>
+  function show(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    event.target.classList.add('active');
+  }
+</script>
+</body>
+</html>
