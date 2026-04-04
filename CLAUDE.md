@@ -196,6 +196,16 @@ Done:
    choose "Prefer this folder for all groups": sets keeper to that folder's copy for
    every duplicate group that has a copy there. Unaffected groups unchanged.
    Design needed before implementation.
+4. **Wrapper folder promotion (#TBD)** — a pattern identified early in the project.
+   Some source folders contain a "wrapper" folder (e.g. My Pictures, My Documents,
+   My Pictures 2012) whose only purpose is to contain the real content one level down.
+   The consolidation preserves this wrapper as-is, producing parallel structures in
+   the target (e.g. top-level year folders from Source A alongside
+   My Pictures 2012/year folders from Source B) instead of merging them.
+   Fix: detect wrapper folder patterns and promote their contents one level,
+   merging with sibling folders of the same structure. Requires design —
+   detection heuristics, user confirmation, and how to handle naming conflicts.
+   This is related to but broader than OS name mapping (#122).
 
 **Folder exclusion note — design correction:**
 CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
