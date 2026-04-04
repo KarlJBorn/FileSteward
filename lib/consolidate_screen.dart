@@ -34,6 +34,27 @@ const _stepLabels = [
 ];
 
 // ---------------------------------------------------------------------------
+// System / junk extensions — pre-excluded by default in the Filter step.
+// These are OS metadata, thumbnails, cache, config, and archive types that
+// are almost never the target of a media/document consolidation.
+// ---------------------------------------------------------------------------
+
+const Set<String> _kSystemExtensions = {
+  // OS metadata & thumbnails
+  '.ithmb', '.ds_store', '.localized', '.spotlight-v100',
+  // Windows leftovers
+  '.ini', '.lnk', '.url', '.sys', '.dll',
+  // Databases & caches
+  '.db', '.sqlite', '.sqlite3', '.cache',
+  // Archives (typically not what you're consolidating)
+  '.bz2', '.gz', '.tar', '.zip', '.rar', '.7z', '.dmg', '.pkg',
+  // Logs & temp
+  '.log', '.tmp', '.temp',
+  // Package / build artefacts
+  '.plist', '.pkginfo', '.o', '.d',
+};
+
+// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -216,7 +237,22 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
         results[folder] = null;
       }
     }
-    if (mounted) setState(() => _inventories = results);
+    if (mounted) {
+      // Pre-exclude system/junk extensions that are present in these folders.
+      final systemPresent = <String>{};
+      for (final inv in results.values) {
+        if (inv == null) continue;
+        for (final stat in inv.extensions) {
+          if (_kSystemExtensions.contains(stat.extension.toLowerCase())) {
+            systemPresent.add(stat.extension);
+          }
+        }
+      }
+      setState(() {
+        _inventories = results;
+        _excludedExtensions.addAll(systemPresent);
+      });
+    }
   }
 
   // Step 1 → 2
@@ -662,12 +698,17 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     final sorted = merged.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
+    final stripController = ScrollController();
     return Container(
-      height: 36,
+      height: 44,
       color: Colors.grey[50],
-      child: ListView.separated(
+      child: Scrollbar(
+        controller: stripController,
+        thumbVisibility: true,
+        child: ListView.separated(
+        controller: stripController,
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 14),
         itemCount: sorted.length,
         separatorBuilder: (context, i) => const SizedBox(width: 6),
         itemBuilder: (context, i) {
@@ -721,6 +762,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
             ),
           );
         },
+        ),
       ),
     );
   }
