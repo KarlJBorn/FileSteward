@@ -61,6 +61,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
 
   // Step 4 — Scan
   int _scanFilesCount = 0;
+  int _scanTotal = 0; // pre-counted before hashing starts
   String _scanningSource = '';
   DateTime? _scanStartTime;
   Duration _elapsed = Duration.zero;
@@ -186,6 +187,24 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     _elapsedTimer = null;
   }
 
+  // Fast recursive file count — no hashing, just walk the tree.
+  // Used to get a denominator for the determinate scan progress bar.
+  Future<int> _countFiles(List<String> folders) async {
+    int total = 0;
+    for (final folder in folders) {
+      try {
+        await for (final entity in Directory(folder)
+            .list(recursive: true, followLinks: false)) {
+          if (entity is File &&
+              !entity.path.split('/').last.startsWith('.')) {
+            total++;
+          }
+        }
+      } catch (_) {}
+    }
+    return total;
+  }
+
   // ---------------------------------------------------------------------------
   // Step transitions
   // ---------------------------------------------------------------------------
@@ -204,10 +223,15 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     setState(() {
       _step = _Step.scan;
       _scanFilesCount = 0;
+      _scanTotal = 0;
       _scanningSource = '';
       _errorMessage = null;
     });
     _startTimer();
+
+    // Quick pre-count (no hashing) to get a denominator for the progress bar.
+    final total = await _countFiles(_folders);
+    if (mounted) setState(() => _scanTotal = total);
 
     // Scan hashes everything; exclusions are applied at build time (#121).
     const extensions = <String>[];
@@ -865,13 +889,20 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                 overflow: TextOverflow.ellipsis,
               ),
             const SizedBox(height: 16),
-            const LinearProgressIndicator(),
+            LinearProgressIndicator(
+              value: (_scanTotal > 0 && _scanFilesCount > 0)
+                  ? (_scanFilesCount / _scanTotal).clamp(0.0, 1.0)
+                  : null, // indeterminate until we have both counts
+            ),
             const SizedBox(height: 8),
-            if (_scanFilesCount > 0)
-              Text(
-                '$_scanFilesCount files hashed',
-                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-              ),
+            Text(
+              _scanTotal > 0
+                  ? '$_scanFilesCount / $_scanTotal files hashed'
+                  : _scanFilesCount > 0
+                      ? '$_scanFilesCount files hashed'
+                      : 'Counting files…',
+              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            ),
           ],
         ),
       ),
@@ -1235,6 +1266,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       _targetManuallySet = false;
       _excludedPaths.clear();
       _excludedExtensions.clear();
+      _scanTotal = 0;
       _scanResult = null;
       _sessionId = null;
       _filesCopied = 0;
