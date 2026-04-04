@@ -82,6 +82,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   Map<String, InventoryResult?> _inventories = {};
   final Set<String> _excludedPaths = {};
   final Set<String> _excludedExtensions = {};
+  final _stripScrollController = ScrollController();
 
   // Step 3 — Scope (no async work here, just confirmation)
 
@@ -118,6 +119,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   void dispose() {
     _elapsedTimer?.cancel();
     _targetNameController.dispose();
+    _stripScrollController.dispose();
     super.dispose();
   }
 
@@ -709,15 +711,14 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     final sorted = merged.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
-    final stripController = ScrollController();
     return Container(
       height: 44,
       color: Colors.grey[50],
       child: Scrollbar(
-        controller: stripController,
+        controller: _stripScrollController,
         thumbVisibility: true,
         child: ListView.separated(
-        controller: stripController,
+        controller: _stripScrollController,
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.fromLTRB(12, 6, 12, 14),
         itemCount: sorted.length,
