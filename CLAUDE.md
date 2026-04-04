@@ -173,7 +173,7 @@ Done:
 - Dart: _StepDot, _SectionHeader, _SourceTile, _BottomBar, _ErrorBanner,
   _ScopeChip, _SummaryChip → carry forward unchanged
 
-### Iteration 8 — Two-Panel Tree View (agreed 2026-04-03)
+### Iteration 8 — Two-Panel Tree View (current — PR #TBD)
 
 **Cut line from Iteration 7:** The two-panel layout materially changes the
 build step (Dart must translate folder-level include/exclude decisions into
