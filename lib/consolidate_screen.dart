@@ -6,8 +6,6 @@ import 'package:flutter/material.dart';
 
 import 'consolidate_models.dart';
 import 'consolidate_service.dart';
-import 'manifest_models.dart';
-import 'manifest_service.dart';
 
 // ---------------------------------------------------------------------------
 // Steps
@@ -34,26 +32,6 @@ const _stepLabels = [
 ];
 
 // ---------------------------------------------------------------------------
-// Important file extensions — pre-selected by default in the Filter step.
-// Empty _includeExtensions means "include everything"; this set seeds the
-// initial selection with the types most likely to matter for consolidation.
-// A future Settings screen will let users add to or modify this list.
-// ---------------------------------------------------------------------------
-
-const Set<String> _kImportantExtensions = {
-  // Photos
-  '.jpg', '.jpeg', '.png', '.heic', '.heif',
-  '.tiff', '.tif', '.raw', '.cr2', '.nef', '.bmp', '.gif', '.webp',
-  // Video
-  '.mp4', '.mov', '.avi', '.mkv', '.m4v', '.wmv', '.m2ts', '.3gp',
-  // Audio
-  '.mp3', '.m4a', '.aac', '.flac', '.wav', '.aiff', '.ogg',
-  // Documents
-  '.doc', '.docx', '.pdf', '.txt', '.rtf', '.odt', '.pages',
-  '.xls', '.xlsx', '.csv', '.numbers', '.ppt', '.pptx', '.key',
-};
-
-// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -66,7 +44,6 @@ class ConsolidateScreen extends StatefulWidget {
 
 class _ConsolidateScreenState extends State<ConsolidateScreen> {
   final _service = const ConsolidateService();
-  final _manifestService = const ManifestService();
 
   _Step _step = _Step.select;
 
@@ -76,10 +53,9 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   final TextEditingController _targetNameController = TextEditingController();
   bool _targetManuallySet = false;
 
-  // Step 2 — Filter (inventory)
-  Map<String, InventoryResult?> _inventories = {};
-  bool _isLoadingInventories = false;
-  Set<String> _includeExtensions = {};
+  // Step 2 — Filter (tree view)
+  final Set<String> _excludedPaths = {};
+  final Set<String> _excludedExtensions = {};
 
   // Step 3 — Scope (no async work here, just confirmation)
 
@@ -214,46 +190,11 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // Step transitions
   // ---------------------------------------------------------------------------
 
-  // Step 0 → 1: load inventories for all selected folders
-  Future<void> _advanceToFilter() async {
-    setState(() {
-      _isLoadingInventories = true;
-      _step = _Step.filter;
-      _inventories = {};
-      _includeExtensions = {};
-      _errorMessage = null;
-    });
-
-    final results = <String, InventoryResult?>{};
-    for (final folder in _folders) {
-      try {
-        final inv = await _manifestService.buildInventory(folder);
-        results[folder] = inv;
-      } catch (_) {
-        results[folder] = null;
-      }
-    }
-
-    if (mounted) {
-      // Pre-select extensions that are both important AND present in these folders.
-      final present = <String>{};
-      for (final inv in results.values) {
-        if (inv == null) continue;
-        for (final stat in inv.extensions) {
-          present.add(stat.extension);
-        }
-      }
-      final preselected = present.intersection(_kImportantExtensions);
-
-      setState(() {
-        _inventories = results;
-        _isLoadingInventories = false;
-        // If any important types are present, pre-select them.
-        // If the folders contain only non-important types, default to all.
-        _includeExtensions = preselected.isNotEmpty ? preselected : {};
+  // Step 0 → 1: transition to tree filter view
+  void _advanceToFilter() => setState(() {
+        _step = _Step.filter;
+        _errorMessage = null;
       });
-    }
-  }
 
   // Step 1 → 2
   void _advanceToScope() => setState(() => _step = _Step.scope);
@@ -268,9 +209,8 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     });
     _startTimer();
 
-    final extensions = _includeExtensions.isEmpty
-        ? <String>[]
-        : _includeExtensions.toList();
+    // Scan hashes everything; exclusions are applied at build time (#121).
+    const extensions = <String>[];
 
     ConsolidateUnifiedScanComplete? scanComplete;
 
@@ -651,144 +591,120 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Step 2 — Filter
+  // Step 2 — Filter (two-panel tree view)
   // ---------------------------------------------------------------------------
 
   Widget _buildFilterStep() {
-    if (_isLoadingInventories) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    // Merge all extension stats across all folders.
-    final merged = <String, int>{};
-    for (final inv in _inventories.values) {
-      if (inv == null) continue;
-      for (final stat in inv.extensions) {
-        merged[stat.extension] =
-            (merged[stat.extension] ?? 0) + stat.count;
-      }
-    }
-    final sortedExts = merged.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    final maxCount =
-        sortedExts.isEmpty ? 1 : sortedExts.map((e) => e.value).reduce((a, b) => a > b ? a : b);
-
+    final excludedCount = _excludedPaths.length + _excludedExtensions.length;
     return Column(
       children: [
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _SectionHeader(
-                  title: 'Folder and File Filter',
-                  subtitle:
-                      'Common media and document types are pre-selected. Uncheck any you want to exclude, or check additional types.',
-                ),
-                const SizedBox(height: 12),
-                if (sortedExts.isEmpty)
-                  Text(
-                    'Could not load file type information.',
-                    style: TextStyle(color: Colors.grey[500]),
-                  )
-                else ...[
-                  // Select all / none
-                  Row(
+        // Panel headers row
+        IntrinsicHeight(
+          child: Row(
+            children: [
+              Expanded(
+                child: Container(
+                  color: Colors.grey[50],
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
                     children: [
-                      SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: Checkbox(
-                          tristate: true,
-                          value: _includeExtensions.isEmpty
-                              ? false
-                              : _includeExtensions.length == merged.length
-                                  ? true
-                                  : null,
-                          onChanged: (_) => setState(() {
-                            if (_includeExtensions.length == merged.length) {
-                              _includeExtensions = {};
-                            } else {
-                              _includeExtensions = merged.keys.toSet();
-                            }
-                          }),
-                          materialTapTargetSize:
-                              MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      const Text('All file types',
-                          style: TextStyle(
-                              fontWeight: FontWeight.w600, fontSize: 13)),
-                      const SizedBox(width: 8),
+                      const Icon(Icons.source, size: 15, color: Color(0xFF0E70C0)),
+                      const SizedBox(width: 6),
                       Text(
-                        _includeExtensions.isEmpty ? '(all included)' : '',
-                        style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                        'Source Folders (${_folders.length})',
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
-                  const Divider(height: 16),
-                  ...sortedExts.map((entry) {
-                    final isSelected =
-                        _includeExtensions.contains(entry.key);
-                    final label = entry.key.isEmpty
-                        ? '(no extension)'
-                        : entry.key;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 3),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: Checkbox(
-                              value: isSelected,
-                              onChanged: (checked) => setState(() {
-                                if (checked == true) {
-                                  _includeExtensions.add(entry.key);
-                                } else {
-                                  _includeExtensions.remove(entry.key);
-                                }
-                              }),
-                              materialTapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          SizedBox(
-                            width: 80,
-                            child: Text(
-                              label,
-                              style: const TextStyle(fontSize: 13),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: LinearProgressIndicator(
-                              value: entry.value / maxCount,
-                              backgroundColor: Colors.grey[200],
-                              color: isSelected || _includeExtensions.isEmpty
-                                  ? const Color(0xFF0E70C0)
-                                  : Colors.grey[300],
-                              minHeight: 6,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '${entry.value}',
-                            style: TextStyle(
-                                fontSize: 12, color: Colors.grey[600]),
-                          ),
-                        ],
+                ),
+              ),
+              const VerticalDivider(width: 1, thickness: 1),
+              Expanded(
+                child: Container(
+                  color: Colors.grey[50],
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.merge_type,
+                          size: 15, color: Color(0xFF0E70C0)),
+                      const SizedBox(width: 6),
+                      const Text(
+                        'Target Preview',
+                        style: TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600),
                       ),
+                      if (excludedCount > 0) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Colors.orange[100],
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            '$excludedCount excluded',
+                            style: TextStyle(
+                                fontSize: 10, color: Colors.orange[800]),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        // Two-panel tree area
+        Expanded(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Left: source folder trees
+              Expanded(
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: _folders.asMap().entries.map((e) {
+                    return _SourceTreePanel(
+                      key: ValueKey('src_${e.key}_${e.value}'),
+                      folder: e.value,
+                      folderIndex: e.key,
+                      color: _folderColor(e.key),
+                      excludedPaths: _excludedPaths,
+                      excludedExtensions: _excludedExtensions,
+                      onExcludePath: (p) =>
+                          setState(() => _excludedPaths.add(p)),
+                      onIncludePath: (p) =>
+                          setState(() => _excludedPaths.remove(p)),
+                      onExcludeExt: (ext) =>
+                          setState(() => _excludedExtensions.add(ext)),
                     );
-                  }),
-                ],
-              ],
-            ),
+                  }).toList(),
+                ),
+              ),
+              const VerticalDivider(width: 1, thickness: 1),
+              // Right: merged target tree
+              Expanded(
+                child: _MergedTreePanel(
+                  key: ValueKey('merged_${_folders.join("|")}'),
+                  folders: _folders,
+                  colors: List.generate(_folders.length, _folderColor),
+                  excludedPaths: _excludedPaths,
+                  excludedExtensions: _excludedExtensions,
+                  onExcludePath: (p) =>
+                      setState(() => _excludedPaths.add(p)),
+                  onIncludePath: (p) =>
+                      setState(() => _excludedPaths.remove(p)),
+                  onExcludeExt: (ext) =>
+                      setState(() => _excludedExtensions.add(ext)),
+                ),
+              ),
+            ],
           ),
         ),
         _BottomBar(
@@ -811,22 +727,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildScopeStep() {
-    // Estimate total files from inventories.
-    int estimatedFiles = 0;
-    if (_includeExtensions.isEmpty) {
-      for (final inv in _inventories.values) {
-        if (inv != null) estimatedFiles += inv.totalFiles;
-      }
-    } else {
-      for (final inv in _inventories.values) {
-        if (inv == null) continue;
-        for (final stat in inv.extensions) {
-          if (_includeExtensions.contains(stat.extension)) {
-            estimatedFiles += stat.count;
-          }
-        }
-      }
-    }
+    final excludedCount = _excludedPaths.length + _excludedExtensions.length;
 
     return Column(
       children: [
@@ -883,17 +784,15 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                         Row(
                           children: [
                             _ScopeChip(
-                              label: 'Files',
-                              value: estimatedFiles > 0
-                                  ? '~$estimatedFiles'
-                                  : '—',
+                              label: 'Scan',
+                              value: 'All files',
                             ),
                             const SizedBox(width: 16),
                             _ScopeChip(
-                              label: 'Types',
-                              value: _includeExtensions.isEmpty
-                                  ? 'All'
-                                  : '${_includeExtensions.length} selected',
+                              label: 'Excluded',
+                              value: excludedCount > 0
+                                  ? '$excludedCount items'
+                                  : 'None',
                             ),
                           ],
                         ),
@@ -1334,8 +1233,8 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       _targetParentPath = null;
       _targetNameController.clear();
       _targetManuallySet = false;
-      _inventories = {};
-      _includeExtensions = {};
+      _excludedPaths.clear();
+      _excludedExtensions.clear();
       _scanResult = null;
       _sessionId = null;
       _filesCopied = 0;
@@ -1579,6 +1478,566 @@ class _SummaryChip extends StatelessWidget {
               style: const TextStyle(fontSize: 12),
               textAlign: TextAlign.center),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tree data model
+// ---------------------------------------------------------------------------
+
+/// A node in a single-source directory tree (left panel).
+class _SourceNode {
+  final String name;
+  final String path; // absolute
+  final bool isDir;
+  List<_SourceNode>? children; // null = not yet loaded
+  bool isExpanded;
+
+  _SourceNode({required this.name, required this.path, required this.isDir})
+      : isExpanded = false;
+}
+
+/// A node in the merged target tree (right panel).
+class _MergedNode {
+  final String name;
+  final String relPath; // relative path from any source root
+  final bool isDir;
+  final Set<int> sourceIndices; // which source folders have this path
+  List<_MergedNode>? children; // null = not yet loaded
+  bool isExpanded;
+  bool isExcluded;
+
+  _MergedNode({
+    required this.name,
+    required this.relPath,
+    required this.isDir,
+    required this.sourceIndices,
+  })  : isExpanded = false,
+        isExcluded = false;
+}
+
+/// Actions available on a tree node context menu.
+enum _TreeAction { excludeFile, excludeExt, excludeFolder, include }
+
+// ---------------------------------------------------------------------------
+// Lazy directory loader helpers
+// ---------------------------------------------------------------------------
+
+List<_SourceNode> _loadSourceChildren(String dirPath) {
+  final dir = Directory(dirPath);
+  if (!dir.existsSync()) return [];
+  try {
+    final entities = dir.listSync(recursive: false, followLinks: false)
+      ..sort((a, b) {
+        final aDir = a is Directory;
+        final bDir = b is Directory;
+        if (aDir != bDir) return aDir ? -1 : 1;
+        return a.path.split('/').last
+            .toLowerCase()
+            .compareTo(b.path.split('/').last.toLowerCase());
+      });
+    return entities
+        .where((e) => !e.path.split('/').last.startsWith('.'))
+        .map((e) => _SourceNode(
+              name: e.path.split('/').last,
+              path: e.path,
+              isDir: e is Directory,
+            ))
+        .toList();
+  } catch (_) {
+    return [];
+  }
+}
+
+List<_MergedNode> _buildMergedChildren(
+    String relPath, List<String> sourceFolders) {
+  // Collect all child names across source folders at this relative path.
+  final nameToSources = <String, Set<int>>{};
+  final nameIsDir = <String, bool>{};
+
+  for (int i = 0; i < sourceFolders.length; i++) {
+    final dirPath = relPath.isEmpty
+        ? sourceFolders[i]
+        : '${sourceFolders[i]}/$relPath';
+    final dir = Directory(dirPath);
+    if (!dir.existsSync()) continue;
+    try {
+      for (final entity
+          in dir.listSync(recursive: false, followLinks: false)) {
+        final name = entity.path.split('/').last;
+        if (name.startsWith('.')) continue;
+        nameToSources.putIfAbsent(name, () => {}).add(i);
+        // isDir wins if any source says it's a dir.
+        nameIsDir[name] = (nameIsDir[name] ?? false) || entity is Directory;
+      }
+    } catch (_) {}
+  }
+
+  final entries = nameToSources.entries.toList()
+    ..sort((a, b) {
+      final aDir = nameIsDir[a.key] ?? false;
+      final bDir = nameIsDir[b.key] ?? false;
+      if (aDir != bDir) return aDir ? -1 : 1;
+      return a.key.toLowerCase().compareTo(b.key.toLowerCase());
+    });
+
+  return entries.map((e) {
+    final childRel = relPath.isEmpty ? e.key : '$relPath/${e.key}';
+    return _MergedNode(
+      name: e.key,
+      relPath: childRel,
+      isDir: nameIsDir[e.key] ?? false,
+      sourceIndices: e.value,
+    );
+  }).toList();
+}
+
+// ---------------------------------------------------------------------------
+// _SourceTreePanel — one source folder tree (left panel)
+// ---------------------------------------------------------------------------
+
+class _SourceTreePanel extends StatefulWidget {
+  final String folder;
+  final int folderIndex;
+  final Color color;
+  final Set<String> excludedPaths;
+  final Set<String> excludedExtensions;
+  final void Function(String) onExcludePath;
+  final void Function(String) onIncludePath;
+  final void Function(String) onExcludeExt;
+
+  const _SourceTreePanel({
+    super.key,
+    required this.folder,
+    required this.folderIndex,
+    required this.color,
+    required this.excludedPaths,
+    required this.excludedExtensions,
+    required this.onExcludePath,
+    required this.onIncludePath,
+    required this.onExcludeExt,
+  });
+
+  @override
+  State<_SourceTreePanel> createState() => _SourceTreePanelState();
+}
+
+class _SourceTreePanelState extends State<_SourceTreePanel> {
+  late _SourceNode _root;
+
+  @override
+  void initState() {
+    super.initState();
+    _root = _SourceNode(
+        name: widget.folder.split('/').last,
+        path: widget.folder,
+        isDir: true);
+    _root.isExpanded = true;
+    _root.children = _loadSourceChildren(widget.folder);
+  }
+
+  void _toggle(_SourceNode node) {
+    setState(() {
+      if (!node.isExpanded) {
+        node.children ??= _loadSourceChildren(node.path);
+      }
+      node.isExpanded = !node.isExpanded;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Folder header
+        Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: widget.color.withValues(alpha: 0.06),
+            border: Border(
+                bottom: BorderSide(
+                    color: widget.color.withValues(alpha: 0.3))),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                margin: const EdgeInsets.only(right: 7),
+                decoration: BoxDecoration(
+                    color: widget.color, shape: BoxShape.circle),
+              ),
+              Text(
+                'Folder ${widget.folderIndex + 1}',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: widget.color),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.folder,
+                  style:
+                      TextStyle(fontSize: 11, color: Colors.grey[600]),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Tree nodes
+        ..._buildNodeList(_root.children ?? [], depth: 0),
+      ],
+    );
+  }
+
+  List<Widget> _buildNodeList(List<_SourceNode> nodes, {required int depth}) {
+    final widgets = <Widget>[];
+    for (final node in nodes) {
+      final ext = node.isDir
+          ? ''
+          : node.name.contains('.')
+              ? '.${node.name.split('.').last.toLowerCase()}'
+              : '';
+      final isExcluded = widget.excludedPaths.contains(node.path) ||
+          (!node.isDir && widget.excludedExtensions.contains(ext));
+
+      widgets.add(_TreeNodeRow(
+        name: node.name,
+        isDir: node.isDir,
+        isExpanded: node.isExpanded,
+        isExcluded: isExcluded,
+        depth: depth,
+        accentColor: widget.color,
+        onTap: node.isDir ? () => _toggle(node) : null,
+        contextItems: _contextItems(node, isExcluded, ext),
+        onContextAction: (action) => _handleAction(action, node, ext),
+      ));
+
+      if (node.isDir && node.isExpanded && node.children != null) {
+        widgets.addAll(_buildNodeList(node.children!, depth: depth + 1));
+      }
+    }
+    return widgets;
+  }
+
+  List<PopupMenuEntry<_TreeAction>> _contextItems(
+      _SourceNode node, bool isExcluded, String ext) {
+    if (isExcluded) {
+      return [
+        const PopupMenuItem(
+            value: _TreeAction.include,
+            child: Text('Include again')),
+      ];
+    }
+    if (node.isDir) {
+      return [
+        const PopupMenuItem(
+            value: _TreeAction.excludeFolder,
+            child: Text('Exclude this folder')),
+      ];
+    }
+    return [
+      const PopupMenuItem(
+          value: _TreeAction.excludeFile,
+          child: Text('Exclude this file')),
+      if (ext.isNotEmpty)
+        PopupMenuItem(
+            value: _TreeAction.excludeExt,
+            child: Text('Exclude all $ext files')),
+    ];
+  }
+
+  void _handleAction(_TreeAction action, _SourceNode node, String ext) {
+    switch (action) {
+      case _TreeAction.excludeFile:
+      case _TreeAction.excludeFolder:
+        widget.onExcludePath(node.path);
+      case _TreeAction.excludeExt:
+        widget.onExcludeExt(ext);
+      case _TreeAction.include:
+        widget.onIncludePath(node.path);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _MergedTreePanel — naive merged target tree (right panel)
+// ---------------------------------------------------------------------------
+
+class _MergedTreePanel extends StatefulWidget {
+  final List<String> folders;
+  final List<Color> colors;
+  final Set<String> excludedPaths;
+  final Set<String> excludedExtensions;
+  final void Function(String) onExcludePath;
+  final void Function(String) onIncludePath;
+  final void Function(String) onExcludeExt;
+
+  const _MergedTreePanel({
+    super.key,
+    required this.folders,
+    required this.colors,
+    required this.excludedPaths,
+    required this.excludedExtensions,
+    required this.onExcludePath,
+    required this.onIncludePath,
+    required this.onExcludeExt,
+  });
+
+  @override
+  State<_MergedTreePanel> createState() => _MergedTreePanelState();
+}
+
+class _MergedTreePanelState extends State<_MergedTreePanel> {
+  List<_MergedNode> _roots = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _roots = _buildMergedChildren('', widget.folders);
+  }
+
+  void _toggle(_MergedNode node) {
+    setState(() {
+      if (!node.isExpanded) {
+        node.children ??=
+            _buildMergedChildren(node.relPath, widget.folders);
+      }
+      node.isExpanded = !node.isExpanded;
+    });
+  }
+
+  bool _isExcluded(_MergedNode node) {
+    final ext = node.isDir
+        ? ''
+        : node.name.contains('.')
+            ? '.${node.name.split('.').last.toLowerCase()}'
+            : '';
+    // Check if all source-absolute paths are excluded.
+    final allSourcePaths = node.sourceIndices.map(
+        (i) => '${widget.folders[i]}/${node.relPath}');
+    if (allSourcePaths.every((p) => widget.excludedPaths.contains(p))) {
+      return true;
+    }
+    if (!node.isDir && widget.excludedExtensions.contains(ext)) return true;
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_roots.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('No files to preview.',
+              style: TextStyle(color: Colors.grey)),
+        ),
+      );
+    }
+    return ListView(
+      padding: EdgeInsets.zero,
+      children: _buildNodeList(_roots, depth: 0),
+    );
+  }
+
+  List<Widget> _buildNodeList(List<_MergedNode> nodes,
+      {required int depth}) {
+    final widgets = <Widget>[];
+    for (final node in nodes) {
+      final excluded = _isExcluded(node);
+      final ext = node.isDir
+          ? ''
+          : node.name.contains('.')
+              ? '.${node.name.split('.').last.toLowerCase()}'
+              : '';
+
+      // Source dots — one per contributing source folder.
+      final dots = node.sourceIndices
+          .where((i) => i < widget.colors.length)
+          .map((i) => widget.colors[i])
+          .toList();
+
+      widgets.add(_TreeNodeRow(
+        name: node.name,
+        isDir: node.isDir,
+        isExpanded: node.isExpanded,
+        isExcluded: excluded,
+        depth: depth,
+        accentColor: Colors.grey[700]!,
+        sourceDots: dots,
+        onTap: node.isDir ? () => _toggle(node) : null,
+        contextItems: _contextItems(node, excluded, ext),
+        onContextAction: (action) => _handleAction(action, node, ext),
+      ));
+
+      if (node.isDir && node.isExpanded && node.children != null) {
+        widgets.addAll(_buildNodeList(node.children!, depth: depth + 1));
+      }
+    }
+    return widgets;
+  }
+
+  List<PopupMenuEntry<_TreeAction>> _contextItems(
+      _MergedNode node, bool excluded, String ext) {
+    if (excluded) {
+      return [
+        const PopupMenuItem(
+            value: _TreeAction.include,
+            child: Text('Include again')),
+      ];
+    }
+    if (node.isDir) {
+      return [
+        const PopupMenuItem(
+            value: _TreeAction.excludeFolder,
+            child: Text('Exclude this folder')),
+      ];
+    }
+    return [
+      const PopupMenuItem(
+          value: _TreeAction.excludeFile,
+          child: Text('Exclude this file')),
+      if (ext.isNotEmpty)
+        PopupMenuItem(
+            value: _TreeAction.excludeExt,
+            child: Text('Exclude all $ext files')),
+    ];
+  }
+
+  void _handleAction(_TreeAction action, _MergedNode node, String ext) {
+    switch (action) {
+      case _TreeAction.excludeFile:
+        // Exclude path in every source that has it.
+        for (final i in node.sourceIndices) {
+          widget.onExcludePath('${widget.folders[i]}/${node.relPath}');
+        }
+      case _TreeAction.excludeFolder:
+        for (final i in node.sourceIndices) {
+          widget.onExcludePath('${widget.folders[i]}/${node.relPath}');
+        }
+      case _TreeAction.excludeExt:
+        widget.onExcludeExt(ext);
+      case _TreeAction.include:
+        for (final i in node.sourceIndices) {
+          widget.onIncludePath('${widget.folders[i]}/${node.relPath}');
+        }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _TreeNodeRow — one row in a tree panel
+// ---------------------------------------------------------------------------
+
+class _TreeNodeRow extends StatelessWidget {
+  final String name;
+  final bool isDir;
+  final bool isExpanded;
+  final bool isExcluded;
+  final int depth;
+  final Color accentColor;
+  final List<Color>? sourceDots;
+  final VoidCallback? onTap;
+  final List<PopupMenuEntry<_TreeAction>> contextItems;
+  final void Function(_TreeAction) onContextAction;
+
+  const _TreeNodeRow({
+    required this.name,
+    required this.isDir,
+    required this.isExpanded,
+    required this.isExcluded,
+    required this.depth,
+    required this.accentColor,
+    required this.contextItems,
+    required this.onContextAction,
+    this.sourceDots,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final indent = 8.0 + depth * 14.0;
+    final textStyle = TextStyle(
+      fontSize: 12,
+      color: isExcluded ? Colors.grey[400] : null,
+      decoration: isExcluded ? TextDecoration.lineThrough : null,
+    );
+
+    return GestureDetector(
+      onSecondaryTapUp: contextItems.isEmpty
+          ? null
+          : (details) async {
+              final action = await showMenu<_TreeAction>(
+                context: context,
+                position: RelativeRect.fromLTRB(
+                  details.globalPosition.dx,
+                  details.globalPosition.dy,
+                  details.globalPosition.dx + 1,
+                  details.globalPosition.dy + 1,
+                ),
+                items: contextItems,
+              );
+              if (action != null) onContextAction(action);
+            },
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(
+          height: 22,
+          child: Row(
+            children: [
+              SizedBox(width: indent),
+              // Chevron / spacer
+              if (isDir)
+                Icon(
+                  isExpanded ? Icons.expand_more : Icons.chevron_right,
+                  size: 14,
+                  color: Colors.grey[500],
+                )
+              else
+                const SizedBox(width: 14),
+              const SizedBox(width: 2),
+              // File/folder icon
+              Icon(
+                isDir ? Icons.folder : Icons.insert_drive_file,
+                size: 13,
+                color: isExcluded
+                    ? Colors.grey[300]
+                    : isDir
+                        ? Colors.amber[700]
+                        : Colors.grey[500],
+              ),
+              const SizedBox(width: 4),
+              // Name
+              Expanded(
+                child: Text(name, style: textStyle,
+                    overflow: TextOverflow.ellipsis),
+              ),
+              // Source dots (merged panel only)
+              if (sourceDots != null && sourceDots!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: sourceDots!
+                        .map((c) => Container(
+                              width: 6,
+                              height: 6,
+                              margin: const EdgeInsets.only(left: 3),
+                              decoration: BoxDecoration(
+                                  color: c, shape: BoxShape.circle),
+                            ))
+                        .toList(),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
