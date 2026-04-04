@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 
 import 'consolidate_models.dart';
 import 'consolidate_service.dart';
+import 'manifest_models.dart';
+import 'manifest_service.dart';
 
 // ---------------------------------------------------------------------------
 // Steps
@@ -44,6 +46,7 @@ class ConsolidateScreen extends StatefulWidget {
 
 class _ConsolidateScreenState extends State<ConsolidateScreen> {
   final _service = const ConsolidateService();
+  final _manifestService = const ManifestService();
 
   _Step _step = _Step.select;
 
@@ -54,6 +57,8 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   bool _targetManuallySet = false;
 
   // Step 2 — Filter (tree view)
+  // Inventories loaded during _advanceToFilter() — used for scan total estimate.
+  Map<String, InventoryResult?> _inventories = {};
   final Set<String> _excludedPaths = {};
   final Set<String> _excludedExtensions = {};
 
@@ -187,33 +192,32 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     _elapsedTimer = null;
   }
 
-  // Fast recursive file count — no hashing, just walk the tree.
-  // Used to get a denominator for the determinate scan progress bar.
-  Future<int> _countFiles(List<String> folders) async {
-    int total = 0;
-    for (final folder in folders) {
-      try {
-        await for (final entity in Directory(folder)
-            .list(recursive: true, followLinks: false)) {
-          if (entity is File &&
-              !entity.path.split('/').last.startsWith('.')) {
-            total++;
-          }
-        }
-      } catch (_) {}
-    }
-    return total;
-  }
-
   // ---------------------------------------------------------------------------
   // Step transitions
   // ---------------------------------------------------------------------------
 
-  // Step 0 → 1: transition to tree filter view
-  void _advanceToFilter() => setState(() {
-        _step = _Step.filter;
-        _errorMessage = null;
-      });
+  // Step 0 → 1: show tree immediately, load inventories in background for
+  // scan-total estimation. Tree uses Directory.listSync() so it doesn't wait.
+  Future<void> _advanceToFilter() async {
+    setState(() {
+      _step = _Step.filter;
+      _inventories = {};
+      _excludedPaths.clear();
+      _excludedExtensions.clear();
+      _errorMessage = null;
+    });
+    // Load inventories in background — not needed for tree display, only for
+    // the scan progress denominator computed in _startScan().
+    final results = <String, InventoryResult?>{};
+    for (final folder in _folders) {
+      try {
+        results[folder] = await _manifestService.buildInventory(folder);
+      } catch (_) {
+        results[folder] = null;
+      }
+    }
+    if (mounted) setState(() => _inventories = results);
+  }
 
   // Step 1 → 2
   void _advanceToScope() => setState(() => _step = _Step.scope);
@@ -229,8 +233,19 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     });
     _startTimer();
 
-    // Quick pre-count (no hashing) to get a denominator for the progress bar.
-    final total = await _countFiles(_folders);
+    // Derive scan total from inventories (already loaded during Filter step).
+    // Subtract excluded extension counts for a more accurate estimate.
+    int total = 0;
+    for (final inv in _inventories.values) {
+      if (inv == null) continue;
+      int folderCount = inv.totalFiles;
+      for (final stat in inv.extensions) {
+        if (_excludedExtensions.contains(stat.extension)) {
+          folderCount -= stat.count;
+        }
+      }
+      total += folderCount.clamp(0, inv.totalFiles);
+    }
     if (mounted) setState(() => _scanTotal = total);
 
     // Scan hashes everything; exclusions are applied at build time (#121).
@@ -1264,6 +1279,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
       _targetParentPath = null;
       _targetNameController.clear();
       _targetManuallySet = false;
+      _inventories = {};
       _excludedPaths.clear();
       _excludedExtensions.clear();
       _scanTotal = 0;
