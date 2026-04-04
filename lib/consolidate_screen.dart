@@ -633,6 +633,98 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   // Step 2 — Filter (two-panel tree view)
   // ---------------------------------------------------------------------------
 
+  /// Compact extension summary strip — one tappable pill per file type,
+  /// sorted by count descending. Tap to toggle exclusion of that type.
+  Widget _buildExtensionStrip() {
+    // Merge extension counts across all inventories.
+    final merged = <String, int>{};
+    for (final inv in _inventories.values) {
+      if (inv == null) continue;
+      for (final stat in inv.extensions) {
+        merged[stat.extension] = (merged[stat.extension] ?? 0) + stat.count;
+      }
+    }
+
+    if (merged.isEmpty) {
+      // Inventories still loading — show a subtle placeholder.
+      return Container(
+        height: 36,
+        color: Colors.grey[50],
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        alignment: Alignment.centerLeft,
+        child: Text(
+          'Loading file types…',
+          style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+        ),
+      );
+    }
+
+    final sorted = merged.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return Container(
+      height: 36,
+      color: Colors.grey[50],
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        itemCount: sorted.length,
+        separatorBuilder: (context, i) => const SizedBox(width: 6),
+        itemBuilder: (context, i) {
+          final ext = sorted[i].key;
+          final count = sorted[i].value;
+          final excluded = _excludedExtensions.contains(ext);
+          final label = ext.isEmpty ? '(none)' : ext;
+          return GestureDetector(
+            onTap: () => setState(() {
+              if (excluded) {
+                _excludedExtensions.remove(ext);
+              } else {
+                _excludedExtensions.add(ext);
+              }
+            }),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: excluded ? Colors.grey[200] : const Color(0xFFE3F0FB),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: excluded
+                      ? Colors.grey[400]!
+                      : const Color(0xFF0E70C0),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (excluded)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 3),
+                      child: Icon(Icons.block,
+                          size: 10, color: Colors.grey[500]),
+                    ),
+                  Text(
+                    '$label  $count',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: excluded
+                          ? Colors.grey[500]
+                          : const Color(0xFF0E70C0),
+                      decoration: excluded
+                          ? TextDecoration.lineThrough
+                          : null,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildFilterStep() {
     final excludedCount = _excludedPaths.length + _excludedExtensions.length;
     return Column(
@@ -698,6 +790,10 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
             ],
           ),
         ),
+        const Divider(height: 1),
+        // Extension summary strip — merged counts across all folders.
+        // Tapping an extension pill excludes/includes that whole type.
+        _buildExtensionStrip(),
         const Divider(height: 1),
         // Two-panel tree area
         Expanded(
