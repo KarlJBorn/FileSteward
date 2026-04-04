@@ -173,7 +173,34 @@ Done:
 - Dart: _StepDot, _SectionHeader, _SourceTile, _BottomBar, _ErrorBanner,
   _ScopeChip, _SummaryChip → carry forward unchanged
 
-### Iteration 8 — Two-Panel Tree View (current — PR #TBD)
+### Iteration 8 — Two-Panel Tree View (current — branch iter8-two-panel-tree, PR #123)
+
+**Shipped in this iteration (v0.6.2–0.6.7):**
+- Step 2 lazy two-panel tree: source trees (left, color-coded) + merged target preview (right, source dots) — #118
+- Extension summary pill strip: horizontally scrollable, sorted by count, tap to exclude/include type
+- _kSystemExtensions constant: .ithmb, .ini, .db, .bz2, .gz, etc. pre-excluded by default
+- Inventory loaded in background during Filter step; used for scan-total denominator
+- Scan respects excluded extensions (passes include list to Rust, not exclude list)
+- Rust hash_all_files_ext emits progress every 100 files — determinate scan progress bar
+- ScrollController moved to State (was recreated on every build — bug fix)
+
+**Known issues discovered during first real-data review session:**
+1. **Build hang on large datasets (#TBD)** — v2Build sends all file paths as one
+   JSON blob over stdin. With 30k+ files this blocks the UI thread writing to the pipe.
+   Fix: write build commands to a temp file; pass file path to Rust instead of stdin blob.
+   This is an architectural change requiring design before implementation.
+2. **Review step: path truncation (#TBD)** — duplicate group radio buttons show
+   truncated paths (…/folder/file.jpg) that are insufficient for decision-making.
+   Fix: show full paths, wrapping if needed.
+3. **Review step: bulk folder preference (#TBD)** — right-click a path option and
+   choose "Prefer this folder for all groups": sets keeper to that folder's copy for
+   every duplicate group that has a copy there. Unaffected groups unchanged.
+   Design needed before implementation.
+
+**Folder exclusion note — design correction:**
+CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
+This was wrong and has been corrected: excluded extensions are passed to Rust at scan
+time via include_extensions. Scan only hashes what will be used.
 
 **Cut line from Iteration 7:** The two-panel layout materially changes the
 build step (Dart must translate folder-level include/exclude decisions into
@@ -205,8 +232,8 @@ the build command), so it is cleanly deferred here.
 - Checkbox next to each folder node in the right panel; checked = included,
   unchecked = excluded — no toggles, no color-only states
 - Excluding a folder is absolute: nothing from it reaches the target
-- Step 2 exclusions affect the target only; the scan (Step 4) still hashes
-  everything — exclusions are applied when building, not when scanning
+- Step 2 exclusions are passed to Rust at scan time via include_extensions —
+  excluded types are not hashed at all (faster + accurate progress count)
 - Step 5 right panel uses the same checkbox model
 
 **Duplicate path indicator (Step 2 right panel):**
