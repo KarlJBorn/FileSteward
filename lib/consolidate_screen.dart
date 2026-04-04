@@ -284,8 +284,19 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     }
     if (mounted) setState(() => _scanTotal = total);
 
-    // Scan hashes everything; exclusions are applied at build time (#121).
-    const extensions = <String>[];
+    // Compute effective include list: all present extensions minus excluded ones.
+    // Passing an empty list means "include everything" to Rust, so we only pass
+    // an explicit list when there are exclusions to apply.
+    final allExtensions = <String>{};
+    for (final inv in _inventories.values) {
+      if (inv == null) continue;
+      for (final stat in inv.extensions) {
+        allExtensions.add(stat.extension);
+      }
+    }
+    final extensions = _excludedExtensions.isEmpty
+        ? <String>[]
+        : allExtensions.difference(_excludedExtensions).toList();
 
     ConsolidateUnifiedScanComplete? scanComplete;
 
