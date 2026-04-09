@@ -296,7 +296,8 @@ Optional mode, toggled at Step 1. When enabled, files are routed into semantic t
 
 **Deferred items (not Iteration 8):**
 - **`.photoslibrary` package skip** — skip during walking (internal DB files, not user content), emit warning. Deferred to pre-Maintain iteration.
-- **Artifact extension management in settings** — configurable list of standard types (`.ini`, `.dat`, `.db`, `.ffs_db`, etc.) that users can include/exclude globally. This is a system-wide settings feature, not specific to Consolidate. Deferred to settings/configuration iteration.
+- **Consolidate-specific file type settings** — configurable list of standard types (`.ini`, `.dat`, `.db`, `.ffs_db`, etc.) that users can include/exclude per consolidation. Deferred to Consolidate configuration iteration.
+- **Maintain design** — all Maintain features deferred. Maintain operates on single live directories and has different filtering/type management needs than Consolidate.
 
 **Folder exclusion note — design correction:**
 CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
