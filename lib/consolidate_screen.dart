@@ -1283,35 +1283,39 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Filename (bold, line 1)
-                        Text(
-                          _leafName(absPath),
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        // Full path (muted, line 2)
-                        Text(
-                          absPath,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        if (group.reasons.isNotEmpty && isChosen)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Text(
-                              group.reasons.join(', '),
-                              style: TextStyle(
-                                  fontSize: 10, color: Colors.grey[500]),
+                    child: GestureDetector(
+                      onSecondaryTapUp: (details) =>
+                          _showBulkPreferenceMenu(context, groupIdx, absPath, details.globalPosition),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Filename (bold, line 1)
+                          Text(
+                            _leafName(absPath),
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                      ],
+                          // Full path (muted, line 2)
+                          Text(
+                            absPath,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                          if (group.reasons.isNotEmpty && isChosen)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                group.reasons.join(', '),
+                                style: TextStyle(
+                                    fontSize: 10, color: Colors.grey[500]),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -1319,6 +1323,130 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
             ),
           );
         }).toList(),
+      ),
+    );
+  }
+
+  /// Show context menu for bulk folder preference operations.
+  void _showBulkPreferenceMenu(
+      BuildContext context, int groupIdx, String absPath, Offset position) {
+    // Extract folder name from absolute path
+    final folderName = _extractFolderName(absPath);
+    if (folderName == null) return;
+
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx,
+        position.dy,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: 'prefer',
+          child: Text('Prefer "$folderName" for all groups'),
+          onTap: () => _applyPreferFolderAll(groupIdx, absPath, folderName),
+        ),
+        PopupMenuItem<String>(
+          value: 'consolidate',
+          child: Text('Consolidate into "$folderName"'),
+          onTap: () =>
+              _applyConsolidateIntoFolder(groupIdx, absPath, folderName),
+        ),
+      ],
+    );
+  }
+
+  /// Extract folder name from absolute path (first path component).
+  String? _extractFolderName(String absPath) {
+    final parts = absPath.split('/').where((p) => p.isNotEmpty).toList();
+    return parts.isNotEmpty ? parts.first : null;
+  }
+
+  /// Apply "Prefer [Folder] for all groups" operation.
+  void _applyPreferFolderAll(int groupIdx, String absPath, String folderName) {
+    final result = _scanResult;
+    if (result == null) return;
+
+    int affectedCount = 0;
+    for (int i = 0; i < result.duplicateGroups.length; i++) {
+      final group = result.duplicateGroups[i];
+      // Check if this group has a file from the same folder
+      if (group.paths.any((p) => p.startsWith(absPath.split('/').first))) {
+        // Find the keeper from this folder
+        final folderPath = group.paths
+            .firstWhere((p) => p.startsWith(absPath.split('/').first), orElse: () => '');
+        if (folderPath.isNotEmpty) {
+          _keeperDecisions[i] = folderPath;
+          affectedCount++;
+        }
+      }
+    }
+
+    if (affectedCount > 0) {
+      _showUndoableToast(
+        'Set $affectedCount groups to prefer "$folderName"',
+        () {
+          // Undo: revert the decisions
+          for (int i = 0; i < result.duplicateGroups.length; i++) {
+            _keeperDecisions.remove(i);
+          }
+          setState(() {});
+        },
+      );
+      setState(() {});
+    }
+  }
+
+  /// Apply "Consolidate into [Folder]" operation.
+  void _applyConsolidateIntoFolder(
+      int groupIdx, String absPath, String folderName) {
+    final result = _scanResult;
+    if (result == null) return;
+
+    int affectedCount = 0;
+    for (int i = 0; i < result.duplicateGroups.length; i++) {
+      final group = result.duplicateGroups[i];
+      final folderPrefix = absPath.split('/').first;
+
+      if (group.paths.any((p) => p.startsWith(folderPrefix))) {
+        // Set keeper from this folder if available
+        final folderPath = group.paths.firstWhere(
+          (p) => p.startsWith(folderPrefix),
+          orElse: () => group.paths.first, // Fallback to first
+        );
+        _keeperDecisions[i] = folderPath;
+        affectedCount++;
+      }
+    }
+
+    if (affectedCount > 0) {
+      _showUndoableToast(
+        'Consolidated $affectedCount groups into "$folderName"',
+        () {
+          // Undo: revert the decisions
+          for (int i = 0; i < result.duplicateGroups.length; i++) {
+            _keeperDecisions.remove(i);
+          }
+          setState(() {});
+        },
+      );
+      setState(() {});
+    }
+  }
+
+  /// Show a toast with an undo button.
+  void _showUndoableToast(String message, VoidCallback onUndo) {
+    final scaffold = ScaffoldMessenger.of(context);
+    scaffold.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 4),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: onUndo,
+        ),
       ),
     );
   }
