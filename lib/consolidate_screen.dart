@@ -1286,21 +1286,30 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // Filename (bold, line 1)
                         Text(
-                          _shortPath(absPath),
+                          _leafName(absPath),
                           style: TextStyle(
                             fontSize: 12,
-                            fontWeight: isChosen
-                                ? FontWeight.w600
-                                : FontWeight.normal,
+                            fontWeight: FontWeight.w600,
                           ),
-                          overflow: TextOverflow.ellipsis,
+                        ),
+                        // Full path (muted, line 2)
+                        Text(
+                          absPath,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey[600],
+                          ),
                         ),
                         if (group.reasons.isNotEmpty && isChosen)
-                          Text(
-                            group.reasons.join(', '),
-                            style: TextStyle(
-                                fontSize: 11, color: Colors.grey[500]),
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              group.reasons.join(', '),
+                              style: TextStyle(
+                                  fontSize: 10, color: Colors.grey[500]),
+                            ),
                           ),
                       ],
                     ),
