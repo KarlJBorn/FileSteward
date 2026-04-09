@@ -173,9 +173,9 @@ Done:
 - Dart: _StepDot, _SectionHeader, _SourceTile, _BottomBar, _ErrorBanner,
   _ScopeChip, _SummaryChip → carry forward unchanged
 
-### Iteration 8 — Two-Panel Tree View (current — branch iter8-two-panel-tree, PR #123)
+### Iteration 8 — Two-Panel Tree View + Bulk Actions ✅ Complete (v0.7.0 — PR #123)
 
-**Shipped in this iteration (v0.6.2–0.6.7):**
+**Shipped in this iteration (v0.7.0):**
 - Step 2 lazy two-panel tree: source trees (left, color-coded) + merged target preview (right, source dots) — #118
 - Extension summary pill strip: horizontally scrollable, sorted by count, tap to exclude/include type
 - _kSystemExtensions constant: .ithmb, .ini, .db, .bz2, .gz, etc. pre-excluded by default
@@ -183,6 +183,9 @@ Done:
 - Scan respects excluded extensions (passes include list to Rust, not exclude list)
 - Rust hash_all_files_ext emits progress every 100 files — determinate scan progress bar
 - ScrollController moved to State (was recreated on every build — bug fix)
+- **Path truncation (feature):** two-line display format in Review step (bold filename, muted full path, no truncation)
+- **Bulk folder preference (feature):** right-click context menu with two operations (Prefer / Consolidate into)
+- **Designs locked for future implementation:** wrapper folder promotion, type-based routing
 
 **Known issues discovered during first real-data review session:**
 1. **Build hang on large datasets (#TBD)** — v2Build sends all file paths as one
@@ -294,10 +297,17 @@ Optional mode, toggled at Step 1. When enabled, files are routed into semantic t
 - Extension filter applies before routing (user excludes types at scan time)
 - Result: clean consolidated structure under canonical type folders
 
-**Deferred items (not Iteration 8):**
-- **`.photoslibrary` package skip** — skip during walking (internal DB files, not user content), emit warning. Deferred to pre-Maintain iteration.
-- **Consolidate-specific file type settings** — configurable list of standard types (`.ini`, `.dat`, `.db`, `.ffs_db`, etc.) that users can include/exclude per consolidation. Deferred to Consolidate configuration iteration.
-- **Maintain design** — all Maintain features deferred. Maintain operates on single live directories and has different filtering/type management needs than Consolidate.
+**Implemented features (Iteration 8):**
+- Path truncation design → implemented as two-line format
+- Bulk folder preference design → implemented with right-click menu and two operations
+
+**Deferred to Iteration 9+ (Consolidate UI Flow Redesign):**
+- **Wrapper folder promotion** — detection, merge proposal (Review), apply (Build)
+- **Type-based routing** — optional mode, file routing by extension + folder context, unknown extension gating
+- **New Review flow** — 6-step user journey: Scan → Review folder structures → Resolve ambiguous folders → Review ambiguous files → Final target review → Approve build
+- **`.photoslibrary` package skip** — safety measure for Rust walk phase
+- **Consolidate-specific file type settings** — configurable defaults per consolidation
+- **Maintain design** — entire Maintain product deferred until after Consolidate v2 complete
 
 **Folder exclusion note — design correction:**
 CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
@@ -362,12 +372,38 @@ the build command), so it is cleanly deferred here.
 - File-level override interactions (later pass)
 - Settings table for user-customisable important-extensions list
 
-### Iteration 9 — iPad/iPhone Review Client
+### Iteration 9 — Consolidate UI Flow Redesign: 6-Step User Journey
+
+**Goal:** Comprehensive redesign of the Review step to match user mental model. Replace current 3-step flow with 6-step flow that gives users visibility into folder structure cleanup and final output before build.
+
+**New flow (replaces current Review step):**
+1. **Scan** — count files, understand structure, types, exclude folders/types
+2. **Review folder structures** — see duplicate groups, suggest folder rationalization (wrapper promotion)
+3. **Resolve ambiguous folders** — clean up folder ambiguities
+4. **Review ambiguous files (Part A: Duplicates)** — resolution panel for duplicate groups
+5. **Review ambiguous files (Part B: Filenames)** — handle naming conflicts and ambiguities
+6. **Final target review** — interactive view of complete proposed output, all movements, verify structure
+7. **Approve build** — confirm and execute
+
+**Features to implement:**
+- Wrapper folder promotion: detect, propose merges, apply at Review #2
+- Type-based routing: route files to Pictures/Movies/Music/Documents based on content + folder context
+- Target structure preview: interactive tree showing what user will get after build
+- Unknown extension gating: force decisions on unrecognized file types before proceeding
+- Folder rationalization UI: surface suggestions about wrapper merges, naming issues
+
+**Reusable components:**
+- _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen (for target preview)
+- _DuplicateGroupsPanel from current Review (for duplicate resolution)
+- Bulk folder preference operations (Prefer / Consolidate into)
+- Path truncation UI (two-line format)
+
+### Iteration 10 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
 
-### Iteration 10 — Advanced UX + Performance
+### Iteration 11 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
 - Performance tuning for large external drives (100k+ files)
 - Rules engine: user-defined naming and placement rules
