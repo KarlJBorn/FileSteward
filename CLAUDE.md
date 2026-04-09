@@ -223,16 +223,38 @@ Done:
    **Notes:**
    - Both operations include unique files from all sources in the final output
    - Right-click anywhere on a file path triggers the menu; folder name is extracted from the radio button group context
-4. **Wrapper folder promotion (#TBD)** — a pattern identified early in the project.
-   Some source folders contain a "wrapper" folder (e.g. My Pictures, My Documents,
-   My Pictures 2012) whose only purpose is to contain the real content one level down.
-   The consolidation preserves this wrapper as-is, producing parallel structures in
-   the target (e.g. top-level year folders from Source A alongside
-   My Pictures 2012/year folders from Source B) instead of merging them.
-   Fix: detect wrapper folder patterns and promote their contents one level,
-   merging with sibling folders of the same structure. Requires design —
-   detection heuristics, user confirmation, and how to handle naming conflicts.
-   This is related to but broader than OS name mapping (#122).
+4. **Wrapper folder promotion — LOCKED DESIGN.** Detect folders that are pure containers (wrappers) and promote their contents one level, merging parallel structures.
+
+   **Detection (Scan phase):**
+   - Known wrapper names: `My Pictures`, `My Documents`, `My Videos`, `My Music`, `My Photos`, `My Files`, + regional variants
+   - Structural heuristic: folders with 0 files at root OR >75% subdirectories + <5% files are flagged as potential wrappers
+   - All detected wrappers are flagged for review
+
+   **Merging criteria:**
+   - Two wrappers merge if:
+     - They share the same child folder names (e.g., both have `2000/`, `2001/`, `2003/`)
+     - AND they contain overlapping duplicate files in those children
+     - This signals they are backups of the same folder structure
+   
+   **Review-time surfacing:**
+   - Before duplicate group review, surface: "Wrapper folder merges detected"
+   - List each merge proposal: `"My Pictures" and "My Pictures 2012" share structure (2000/, 2001/, ...) — merge into Pictures?`
+   - User confirms or rejects each merge with checkbox
+   - Cannot proceed to duplicate review until all merge decisions are made
+   
+   **Build-time application:**
+   - For confirmed merges:
+     - Combine children from both wrappers (e.g., merge `My Pictures/2000/` with `My Pictures 2012/2000/`)
+     - Deduplicate files using existing duplicate logic
+     - Result: single output folder structure (e.g., `Pictures/2000/`, `Pictures/2001/`, ...)
+   - For wrappers NOT merged:
+     - If wrapper has year/event subfolders (e.g., `2000/`, `2001/`) → merge into canonical type folder (`Pictures/`)
+     - If wrapper has NO year subfolders (just files) → promote as subfolder under canonical folder (e.g., `My Pictures 2012/photo.jpg` → `Pictures/2012/photo.jpg`)
+   
+   **Interaction with type-based routing:**
+   - Wrapper merges apply first (structural cleanup)
+   - Type-based routing applies second (if enabled)
+   - Result: clean consolidated structure under canonical type folders (Pictures, Movies, Music, Documents)
 
 **Folder exclusion note — design correction:**
 CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
