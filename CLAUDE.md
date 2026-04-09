@@ -194,31 +194,35 @@ Done:
    **photo.jpg**
    /Users/karlborn/My Pictures/2000/BikeSwim/
    ```
-3. **Review step: bulk folder preference — LOCKED DESIGN.** Right-click on any file path within a duplicate group to bulk-apply a keeper preference.
+3. **Review step: bulk folder preference — LOCKED DESIGN.** Right-click on any file path within a duplicate group to bulk-apply a keeper preference. Two operations available.
 
    **Interaction:**
    - User views a duplicate group with radio buttons for each folder's copy
    - User right-clicks on a file path (e.g., "2000/BikeSwim/photo.jpg" under Folder A)
-   - Context menu appears with single option: `Prefer "Folder A" for all groups`
-   - User clicks it
-   - Action completes immediately (no confirmation dialog)
+   - Context menu appears with two options:
+     - `Prefer "Folder A" for all groups`
+     - `Consolidate into "Folder A"`
+   - User selects one; action completes immediately (no confirmation dialog)
    
-   **Effect:**
+   **Operation 1: Prefer [Folder] for all groups**
    - For every duplicate group containing a copy from Folder A, set keeper = Folder A
-   - Groups without a Folder A copy remain unchanged (still ambiguous if they have >1 option)
-   - Visual feedback: Toast/snackbar appears: `"Set N groups to prefer Folder A"` with undo button
-   - Undo: reverts the bulk preference; affected groups return to "unresolved" state
-   - Duration: toast auto-dismisses in 4 seconds or when user dismisses
+   - Groups without a Folder A copy remain unchanged (still need user resolution)
+   - Toast: `"Set N groups to prefer Folder A"` with undo button, 4-second auto-dismiss
+   - Build remains blocked until ALL groups resolved
    
-   **Reversibility:**
+   **Operation 2: Consolidate into [Folder]**
+   - For every duplicate group containing a copy from Folder A, set keeper = Folder A
+   - For duplicate groups NOT containing Folder A (B/C only): auto-resolve to first source (alphabetically)
+   - Toast: `"Consolidated N groups into Folder A"` with undo button, 4-second auto-dismiss
+   - If this resolves all ambiguous groups → Build becomes available immediately
+   
+   **Reversibility (both operations):**
    - User can undo via toast button within the toast lifetime
    - After toast dismisses, user can override individual groups by clicking different radio buttons
-   - Build is still blocked until ALL groups (including those not affected by bulk preference) have keeper decisions
    
-   **Edge cases:**
-   - If bulk preference resolves all remaining ambiguous groups → Build becomes available immediately
-   - If bulk preference leaves some groups unresolved → user continues reviewing those groups
-   - Right-click anywhere on a file path triggers the menu; the folder name for the menu item is extracted from the radio button group context
+   **Notes:**
+   - Both operations include unique files from all sources in the final output
+   - Right-click anywhere on a file path triggers the menu; folder name is extracted from the radio button group context
 4. **Wrapper folder promotion (#TBD)** — a pattern identified early in the project.
    Some source folders contain a "wrapper" folder (e.g. My Pictures, My Documents,
    My Pictures 2012) whose only purpose is to contain the real content one level down.
