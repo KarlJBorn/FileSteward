@@ -1,6 +1,8 @@
 # Ignore everything in this directory by default
 *
 
-# Except the shared project settings
+# Except the shared project settings and session archives
 !.gitignore
 !settings.json
+!sessions/
+!sessions/**
