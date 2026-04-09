@@ -256,6 +256,48 @@ Done:
    - Type-based routing applies second (if enabled)
    - Result: clean consolidated structure under canonical type folders (Pictures, Movies, Music, Documents)
 
+## Type-based Consolidation Routing — LOCKED DESIGN
+
+Optional mode, toggled at Step 1. When enabled, files are routed into semantic type folders based on content and folder context.
+
+**Routing priority (context takes precedence over extension):**
+1. **Folder context (OS wrapper) wins:** If file is under an OS-mapped wrapper (`My Pictures` → `Pictures/`, `My Documents` → `Documents/`), the wrapper determines destination regardless of file extension.
+   - Example: `My Documents/Scans/photo.jpg` → `Documents/Scans/photo.jpg` (not `Pictures/`)
+2. **Extension-based routing (fallback):** If file has no OS wrapper context, extension determines destination:
+   - Image extensions (`.jpg`, `.heic`, `.png`, `.gif`, `.bmp`, `.raw`, etc.) → `Pictures/`
+   - Video extensions (`.mp4`, `.mov`, `.avi`, `.mkv`, etc.) → `Movies/`
+   - Audio extensions (`.mp3`, `.aac`, `.wav`, `.flac`, `.m4a`, etc.) → `Music/`
+   - Known document extensions (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.txt`, `.rtf`, etc.) → `Documents/`
+   - Unknown extensions → gated (see below)
+
+**Unknown extension handling:**
+- If an unknown extension has >10 files: filter step surfaces it as a group requiring a decision
+- User chooses per extension group: **Exclude** (don't copy), **Route to Documents**, or **Route to Other**
+- Build blocked until all unknown extension groups (>10 files) are resolved
+- `Other/` is intentional (user explicitly chose to defer), never silent
+
+**Path preservation:**
+- File path under the type folder preserves the containing folder structure
+- OS wrapper folder names are stripped (they collapse into the type folder root)
+- Example: `My Pictures/2000/BikeSwim/photo.jpg` → `Pictures/2000/BikeSwim/photo.jpg`
+
+**Mixed folders:**
+- File-level routing, not folder-level
+- A folder with both `.jpg` and `.xlsx` gets split: photos route to `Pictures/`, spreadsheets route to `Documents/`
+
+**Naming collision (unique files, different content, same output path):**
+- First: `photo.jpg`, Second: `photo2.jpg`, Third: `photo3.jpg`
+- Numeric suffix, no separator
+
+**Interaction with other features:**
+- Wrapper merges apply before type routing (structural cleanup first)
+- Extension filter applies before routing (user excludes types at scan time)
+- Result: clean consolidated structure under canonical type folders
+
+**Deferred items (not Iteration 8):**
+- **`.photoslibrary` package skip** — skip during walking (internal DB files, not user content), emit warning. Deferred to pre-Maintain iteration.
+- **Artifact extension management in settings** — configurable list of standard types (`.ini`, `.dat`, `.db`, `.ffs_db`, etc.) that users can include/exclude globally. This is a system-wide settings feature, not specific to Consolidate. Deferred to settings/configuration iteration.
+
 **Folder exclusion note — design correction:**
 CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
 This was wrong and has been corrected: excluded extensions are passed to Rust at scan
