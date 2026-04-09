@@ -12,6 +12,14 @@
 - `main` is protected. No direct pushes.
 - All work happens on feature branches, merged via PR.
 - Branch naming: `iter3/short-description`, `design/topic`, `fix/topic`, `process/topic`.
+- Feature branches are **ephemeral** — delete after PR merge.
+- Worktrees are **ephemeral** — created per session, deleted when done. One iteration per thread.
+
+## Thread and iteration discipline
+
+- **One iteration per thread.** A thread is scoped to a single iteration. Never open a new thread mid-iteration.
+- **Handoffs only at iteration boundaries.** When an iteration is feature-complete, prepare a handoff for the next thread.
+- **Ephemeral branches and worktrees.** Feature branches are deleted after merge. Worktrees are created fresh for the session and removed when the iteration ships.
 
 ## Development workflow
 

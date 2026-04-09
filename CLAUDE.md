@@ -173,7 +173,146 @@ Done:
 - Dart: _StepDot, _SectionHeader, _SourceTile, _BottomBar, _ErrorBanner,
   _ScopeChip, _SummaryChip → carry forward unchanged
 
-### Iteration 8 — Two-Panel Tree View (agreed 2026-04-03)
+### Iteration 8 — Two-Panel Tree View + Bulk Actions ✅ Complete (v0.7.0 — PR #123)
+
+**Shipped in this iteration (v0.7.0):**
+- Step 2 lazy two-panel tree: source trees (left, color-coded) + merged target preview (right, source dots) — #118
+- Extension summary pill strip: horizontally scrollable, sorted by count, tap to exclude/include type
+- _kSystemExtensions constant: .ithmb, .ini, .db, .bz2, .gz, etc. pre-excluded by default
+- Inventory loaded in background during Filter step; used for scan-total denominator
+- Scan respects excluded extensions (passes include list to Rust, not exclude list)
+- Rust hash_all_files_ext emits progress every 100 files — determinate scan progress bar
+- ScrollController moved to State (was recreated on every build — bug fix)
+- **Path truncation (feature):** two-line display format in Review step (bold filename, muted full path, no truncation)
+- **Bulk folder preference (feature):** right-click context menu with two operations (Prefer / Consolidate into)
+- **Designs locked for future implementation:** wrapper folder promotion, type-based routing
+
+**Known issues discovered during first real-data review session:**
+1. **Build hang on large datasets (#TBD)** — v2Build sends all file paths as one
+   JSON blob over stdin. With 30k+ files this blocks the UI thread writing to the pipe.
+   Fix: write build commands to a temp file; pass file path to Rust instead of stdin blob.
+   This is an architectural change requiring design before implementation.
+2. **Review step: path truncation — LOCKED DESIGN.** Display format: **filename** on line 1 (bold, primary), full folder path `/path/to/folder/` on line 2 (muted/secondary text, wraps if needed). No truncation. Filename is the focus; path provides full context. Example:
+   ```
+   **photo.jpg**
+   /Users/karlborn/My Pictures/2000/BikeSwim/
+   ```
+3. **Review step: bulk folder preference — LOCKED DESIGN.** Right-click on any file path within a duplicate group to bulk-apply a keeper preference. Two operations available.
+
+   **Interaction:**
+   - User views a duplicate group with radio buttons for each folder's copy
+   - User right-clicks on a file path (e.g., "2000/BikeSwim/photo.jpg" under Folder A)
+   - Context menu appears with two options:
+     - `Prefer "Folder A" for all groups`
+     - `Consolidate into "Folder A"`
+   - User selects one; action completes immediately (no confirmation dialog)
+   
+   **Operation 1: Prefer [Folder] for all groups**
+   - For every duplicate group containing a copy from Folder A, set keeper = Folder A
+   - Groups without a Folder A copy remain unchanged (still need user resolution)
+   - Toast: `"Set N groups to prefer Folder A"` with undo button, 4-second auto-dismiss
+   - Build remains blocked until ALL groups resolved
+   
+   **Operation 2: Consolidate into [Folder]**
+   - For every duplicate group containing a copy from Folder A, set keeper = Folder A
+   - For duplicate groups NOT containing Folder A (B/C only): auto-resolve to first source (alphabetically)
+   - Toast: `"Consolidated N groups into Folder A"` with undo button, 4-second auto-dismiss
+   - If this resolves all ambiguous groups → Build becomes available immediately
+   
+   **Reversibility (both operations):**
+   - User can undo via toast button within the toast lifetime
+   - After toast dismisses, user can override individual groups by clicking different radio buttons
+   
+   **Notes:**
+   - Both operations include unique files from all sources in the final output
+   - Right-click anywhere on a file path triggers the menu; folder name is extracted from the radio button group context
+4. **Wrapper folder promotion — LOCKED DESIGN.** Detect folders that are pure containers (wrappers) and promote their contents one level, merging parallel structures.
+
+   **Detection (Scan phase):**
+   - Known wrapper names: `My Pictures`, `My Documents`, `My Videos`, `My Music`, `My Photos`, `My Files`, + regional variants
+   - Structural heuristic: folders with 0 files at root OR >75% subdirectories + <5% files are flagged as potential wrappers
+   - All detected wrappers are flagged for review
+
+   **Merging criteria:**
+   - Two wrappers merge if:
+     - They share the same child folder names (e.g., both have `2000/`, `2001/`, `2003/`)
+     - AND they contain overlapping duplicate files in those children
+     - This signals they are backups of the same folder structure
+   
+   **Review-time surfacing:**
+   - Before duplicate group review, surface: "Wrapper folder merges detected"
+   - List each merge proposal: `"My Pictures" and "My Pictures 2012" share structure (2000/, 2001/, ...) — merge into Pictures?`
+   - User confirms or rejects each merge with checkbox
+   - Cannot proceed to duplicate review until all merge decisions are made
+   
+   **Build-time application:**
+   - For confirmed merges:
+     - Combine children from both wrappers (e.g., merge `My Pictures/2000/` with `My Pictures 2012/2000/`)
+     - Deduplicate files using existing duplicate logic
+     - Result: single output folder structure (e.g., `Pictures/2000/`, `Pictures/2001/`, ...)
+   - For wrappers NOT merged:
+     - If wrapper has year/event subfolders (e.g., `2000/`, `2001/`) → merge into canonical type folder (`Pictures/`)
+     - If wrapper has NO year subfolders (just files) → promote as subfolder under canonical folder (e.g., `My Pictures 2012/photo.jpg` → `Pictures/2012/photo.jpg`)
+   
+   **Interaction with type-based routing:**
+   - Wrapper merges apply first (structural cleanup)
+   - Type-based routing applies second (if enabled)
+   - Result: clean consolidated structure under canonical type folders (Pictures, Movies, Music, Documents)
+
+## Type-based Consolidation Routing — LOCKED DESIGN
+
+Optional mode, toggled at Step 1. When enabled, files are routed into semantic type folders based on content and folder context.
+
+**Routing priority (context takes precedence over extension):**
+1. **Folder context (OS wrapper) wins:** If file is under an OS-mapped wrapper (`My Pictures` → `Pictures/`, `My Documents` → `Documents/`), the wrapper determines destination regardless of file extension.
+   - Example: `My Documents/Scans/photo.jpg` → `Documents/Scans/photo.jpg` (not `Pictures/`)
+2. **Extension-based routing (fallback):** If file has no OS wrapper context, extension determines destination:
+   - Image extensions (`.jpg`, `.heic`, `.png`, `.gif`, `.bmp`, `.raw`, etc.) → `Pictures/`
+   - Video extensions (`.mp4`, `.mov`, `.avi`, `.mkv`, etc.) → `Movies/`
+   - Audio extensions (`.mp3`, `.aac`, `.wav`, `.flac`, `.m4a`, etc.) → `Music/`
+   - Known document extensions (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.txt`, `.rtf`, etc.) → `Documents/`
+   - Unknown extensions → gated (see below)
+
+**Unknown extension handling:**
+- If an unknown extension has >10 files: filter step surfaces it as a group requiring a decision
+- User chooses per extension group: **Exclude** (don't copy), **Route to Documents**, or **Route to Other**
+- Build blocked until all unknown extension groups (>10 files) are resolved
+- `Other/` is intentional (user explicitly chose to defer), never silent
+
+**Path preservation:**
+- File path under the type folder preserves the containing folder structure
+- OS wrapper folder names are stripped (they collapse into the type folder root)
+- Example: `My Pictures/2000/BikeSwim/photo.jpg` → `Pictures/2000/BikeSwim/photo.jpg`
+
+**Mixed folders:**
+- File-level routing, not folder-level
+- A folder with both `.jpg` and `.xlsx` gets split: photos route to `Pictures/`, spreadsheets route to `Documents/`
+
+**Naming collision (unique files, different content, same output path):**
+- First: `photo.jpg`, Second: `photo2.jpg`, Third: `photo3.jpg`
+- Numeric suffix, no separator
+
+**Interaction with other features:**
+- Wrapper merges apply before type routing (structural cleanup first)
+- Extension filter applies before routing (user excludes types at scan time)
+- Result: clean consolidated structure under canonical type folders
+
+**Implemented features (Iteration 8):**
+- Path truncation design → implemented as two-line format
+- Bulk folder preference design → implemented with right-click menu and two operations
+
+**Deferred to Iteration 9+ (Consolidate UI Flow Redesign):**
+- **Wrapper folder promotion** — detection, merge proposal (Review), apply (Build)
+- **Type-based routing** — optional mode, file routing by extension + folder context, unknown extension gating
+- **New Review flow** — 6-step user journey: Scan → Review folder structures → Resolve ambiguous folders → Review ambiguous files → Final target review → Approve build
+- **`.photoslibrary` package skip** — safety measure for Rust walk phase
+- **Consolidate-specific file type settings** — configurable defaults per consolidation
+- **Maintain design** — entire Maintain product deferred until after Consolidate v2 complete
+
+**Folder exclusion note — design correction:**
+CLAUDE.md previously said "scan hashes everything; exclusions applied at build time."
+This was wrong and has been corrected: excluded extensions are passed to Rust at scan
+time via include_extensions. Scan only hashes what will be used.
 
 **Cut line from Iteration 7:** The two-panel layout materially changes the
 build step (Dart must translate folder-level include/exclude decisions into
@@ -205,8 +344,8 @@ the build command), so it is cleanly deferred here.
 - Checkbox next to each folder node in the right panel; checked = included,
   unchecked = excluded — no toggles, no color-only states
 - Excluding a folder is absolute: nothing from it reaches the target
-- Step 2 exclusions affect the target only; the scan (Step 4) still hashes
-  everything — exclusions are applied when building, not when scanning
+- Step 2 exclusions are passed to Rust at scan time via include_extensions —
+  excluded types are not hashed at all (faster + accurate progress count)
 - Step 5 right panel uses the same checkbox model
 
 **Duplicate path indicator (Step 2 right panel):**
@@ -233,12 +372,38 @@ the build command), so it is cleanly deferred here.
 - File-level override interactions (later pass)
 - Settings table for user-customisable important-extensions list
 
-### Iteration 9 — iPad/iPhone Review Client
+### Iteration 9 — Consolidate UI Flow Redesign: 6-Step User Journey
+
+**Goal:** Comprehensive redesign of the Review step to match user mental model. Replace current 3-step flow with 6-step flow that gives users visibility into folder structure cleanup and final output before build.
+
+**New flow (replaces current Review step):**
+1. **Scan** — count files, understand structure, types, exclude folders/types
+2. **Review folder structures** — see duplicate groups, suggest folder rationalization (wrapper promotion)
+3. **Resolve ambiguous folders** — clean up folder ambiguities
+4. **Review ambiguous files (Part A: Duplicates)** — resolution panel for duplicate groups
+5. **Review ambiguous files (Part B: Filenames)** — handle naming conflicts and ambiguities
+6. **Final target review** — interactive view of complete proposed output, all movements, verify structure
+7. **Approve build** — confirm and execute
+
+**Features to implement:**
+- Wrapper folder promotion: detect, propose merges, apply at Review #2
+- Type-based routing: route files to Pictures/Movies/Music/Documents based on content + folder context
+- Target structure preview: interactive tree showing what user will get after build
+- Unknown extension gating: force decisions on unrecognized file types before proceeding
+- Folder rationalization UI: surface suggestions about wrapper merges, naming issues
+
+**Reusable components:**
+- _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen (for target preview)
+- _DuplicateGroupsPanel from current Review (for duplicate resolution)
+- Bulk folder preference operations (Prefer / Consolidate into)
+- Path truncation UI (two-line format)
+
+### Iteration 10 — iPad/iPhone Review Client
 - Open saved scan, review groups, approve/reject recommendations
 - Focused scans via Apple document picker / security-scoped URLs
 - Sync saved scan state
 
-### Iteration 10 — Advanced UX + Performance
+### Iteration 11 — Advanced UX + Performance
 - Visual topology of folders and duplicate clusters
 - Performance tuning for large external drives (100k+ files)
 - Rules engine: user-defined naming and placement rules

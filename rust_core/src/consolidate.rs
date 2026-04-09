@@ -1182,8 +1182,20 @@ fn handle_v2_build(cmd: V2BuildCmd) {
 
 /// Like [hash_all_files] but optionally filtered by file extensions.
 /// [extensions] entries must be lowercase with leading dot, e.g. [".jpg"].
-fn hash_all_files_ext(root: &Path, extensions: &[String]) -> Vec<(String, Option<String>, u64)> {
+/// Hash all files under `root`, optionally filtered by `extensions`.
+/// Emits a `consolidate_progress` event every `progress_interval` files so
+/// the Flutter UI can drive a determinate progress bar.
+/// `source` is the folder label; `base_count` is the number of files already
+/// hashed from previous folders (so the running total stays monotonic).
+fn hash_all_files_ext(
+    root: &Path,
+    extensions: &[String],
+    source: &str,
+    base_count: usize,
+    progress_interval: usize,
+) -> Vec<(String, Option<String>, u64)> {
     let files = walk_files(root);
+    let counter = AtomicUsize::new(0);
     files
         .par_iter()
         .filter(|p| {
@@ -1204,6 +1216,14 @@ fn hash_all_files_ext(root: &Path, extensions: &[String]) -> Vec<(String, Option
                 .strip_prefix(root)
                 .map(|r| r.to_string_lossy().to_string())
                 .unwrap_or_default();
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % progress_interval == 0 {
+                emit(&ConsolidateProgressEvent {
+                    event_type: "consolidate_progress",
+                    source: source.to_string(),
+                    files_scanned: base_count + n,
+                });
+            }
             (rel, hash, size)
         })
         .collect()
@@ -1230,13 +1250,19 @@ fn handle_unified_scan(cmd: UnifiedScanCmd) {
     });
 
     // Hash all files across all folders, tracking which folder each came from.
+    // Emit per-file progress every 100 files so the Flutter UI bar advances
+    // smoothly rather than jumping folder-by-folder.
     let mut all_entries: Vec<(String, String, Option<String>, u64)> = Vec::new();
     for folder in &cmd.folders {
         let folder_path = PathBuf::from(folder);
-        let folder_entries = hash_all_files_ext(&folder_path, &cmd.include_extensions);
+        let base = all_entries.len();
+        let folder_entries =
+            hash_all_files_ext(&folder_path, &cmd.include_extensions, folder, base, 100);
         for (rel, hash_opt, size) in folder_entries {
             all_entries.push((folder.clone(), rel, hash_opt, size));
         }
+        // Emit a final event for this folder so the count is always current
+        // after each folder completes (catches the remainder < 100).
         emit(&ConsolidateProgressEvent {
             event_type: "consolidate_progress",
             source: folder.clone(),
