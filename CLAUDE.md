@@ -194,10 +194,31 @@ Done:
    **photo.jpg**
    /Users/karlborn/My Pictures/2000/BikeSwim/
    ```
-3. **Review step: bulk folder preference (#TBD)** — right-click a path option and
-   choose "Prefer this folder for all groups": sets keeper to that folder's copy for
-   every duplicate group that has a copy there. Unaffected groups unchanged.
-   Design needed before implementation.
+3. **Review step: bulk folder preference — LOCKED DESIGN.** Right-click on any file path within a duplicate group to bulk-apply a keeper preference.
+
+   **Interaction:**
+   - User views a duplicate group with radio buttons for each folder's copy
+   - User right-clicks on a file path (e.g., "2000/BikeSwim/photo.jpg" under Folder A)
+   - Context menu appears with single option: `Prefer "Folder A" for all groups`
+   - User clicks it
+   - Action completes immediately (no confirmation dialog)
+   
+   **Effect:**
+   - For every duplicate group containing a copy from Folder A, set keeper = Folder A
+   - Groups without a Folder A copy remain unchanged (still ambiguous if they have >1 option)
+   - Visual feedback: Toast/snackbar appears: `"Set N groups to prefer Folder A"` with undo button
+   - Undo: reverts the bulk preference; affected groups return to "unresolved" state
+   - Duration: toast auto-dismisses in 4 seconds or when user dismisses
+   
+   **Reversibility:**
+   - User can undo via toast button within the toast lifetime
+   - After toast dismisses, user can override individual groups by clicking different radio buttons
+   - Build is still blocked until ALL groups (including those not affected by bulk preference) have keeper decisions
+   
+   **Edge cases:**
+   - If bulk preference resolves all remaining ambiguous groups → Build becomes available immediately
+   - If bulk preference leaves some groups unresolved → user continues reviewing those groups
+   - Right-click anywhere on a file path triggers the menu; the folder name for the menu item is extracted from the radio button group context
 4. **Wrapper folder promotion (#TBD)** — a pattern identified early in the project.
    Some source folders contain a "wrapper" folder (e.g. My Pictures, My Documents,
    My Pictures 2012) whose only purpose is to contain the real content one level down.
