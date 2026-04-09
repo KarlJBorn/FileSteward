@@ -189,9 +189,11 @@ Done:
    JSON blob over stdin. With 30k+ files this blocks the UI thread writing to the pipe.
    Fix: write build commands to a temp file; pass file path to Rust instead of stdin blob.
    This is an architectural change requiring design before implementation.
-2. **Review step: path truncation (#TBD)** — duplicate group radio buttons show
-   truncated paths (…/folder/file.jpg) that are insufficient for decision-making.
-   Fix: show full paths, wrapping if needed.
+2. **Review step: path truncation — LOCKED DESIGN.** Display format: **filename** on line 1 (bold, primary), full folder path `/path/to/folder/` on line 2 (muted/secondary text, wraps if needed). No truncation. Filename is the focus; path provides full context. Example:
+   ```
+   **photo.jpg**
+   /Users/karlborn/My Pictures/2000/BikeSwim/
+   ```
 3. **Review step: bulk folder preference (#TBD)** — right-click a path option and
    choose "Prefer this folder for all groups": sets keeper to that folder's copy for
    every duplicate group that has a copy there. Unaffected groups unchanged.
