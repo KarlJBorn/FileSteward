@@ -159,6 +159,63 @@ class ConsolidateService {
   }
 
   // ---------------------------------------------------------------------------
+  // v3: Structure scan (Scan 1 — no hashing)
+  // ---------------------------------------------------------------------------
+
+  /// Walk [folders], detect structurally equivalent subdirectories, count file
+  /// types. No hashing — fast first pass for the Scan 1 UI.
+  Stream<ConsolidateEvent> structureScan({
+    required List<String> folders,
+  }) {
+    final cmd = {
+      'command': 'consolidate_structure_scan',
+      'folders': folders,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
+  // v3: Content scan (Scan 2 — with hashing)
+  // ---------------------------------------------------------------------------
+
+  /// Hash all files in [folders], deduplicate by hash, route each file to its
+  /// target, detect filename collisions (sequential rename) and ambiguities.
+  Stream<ConsolidateEvent> contentScan({
+    required List<String> folders,
+    List<String> excludedExtensions = const [],
+    List<String> excludedFolders = const [],
+    List<String> overriddenPaths = const [],
+  }) {
+    final cmd = {
+      'command': 'consolidate_content_scan',
+      'folders': folders,
+      'excluded_extensions': excludedExtensions,
+      'excluded_folders': excludedFolders,
+      'overridden_paths': overriddenPaths,
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
+  // v3: Build (content scan routing plan)
+  // ---------------------------------------------------------------------------
+
+  /// Execute a build from the v3 content scan routing plan.
+  /// [routing] should be the resolved routing list with collision overrides
+  /// already applied. Only "copy" and "copy_renamed" actions are sent.
+  Stream<ConsolidateEvent> v3Build({
+    required String target,
+    required List<V3RoutedFileCmd> routing,
+  }) {
+    final cmd = {
+      'command': 'consolidate_v3_build',
+      'target': target,
+      'routing': routing.map((r) => r.toJson()).toList(),
+    };
+    return _run(cmd);
+  }
+
+  // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
 
