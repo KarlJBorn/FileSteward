@@ -111,23 +111,63 @@ targeted.
   files, deduplicates, detects collisions and ambiguities, produces routing plan.
   Powers Screen 3 (Review).
 
-**Screen 2 (Filter) — locked design:** ✅ Implemented
-- Left: Finder-style lazy tree per source folder (expandable, right-click to exclude)
-- Right: Merged target tree (live view of what will be consolidated)
-- File type ribbon: horizontally scrollable with left/right arrows + scrollbar underneath
-- "Include again" on extension-excluded file: re-includes that file only via path
-  override; does not un-exclude the extension globally
-- Exclusions (paths + extensions) passed to Scan 2
+**Screen 2 (Filter) — agreed fixes:** ⏳ Iteration 11
+- File type ribbon: always-visible scrollbar (not hover-to-reveal)
+- Context menu on excluded file: "Keep this file" (path-level override) and
+  "Keep all .[ext] files" (removes extension from excluded list, restores ribbon chip to blue)
+- Folder exclusion must cascade visually to all descendants (grey + strikethrough);
+  verify engine exclusion also cascades
+- File type pre-population (recommended exclusions) — **deferred** pending settings window
+- Left: Finder-style lazy tree per source folder (expandable, right-click to exclude) ✅
+- Right: Merged target tree (live view of what will be consolidated) ✅
+- Exclusions (paths + extensions) passed to Scan 2 ✅
 
-**Screen 3 (Review) — locked design (2026-04-09):** ✅ Implemented (v0.6.6)
-- Sub-phases 3.1 (hashing) and 3.2 (review) handled within one widget
-- 3.1: Deterministic progress bar — "Hashed X of Y files" (total from Scan 1)
-- 3.2: Stats band (files to copy, duplicates, output size, issues count)
-- 3.2: Left panel — source trees, one collapsible section per source folder (read-only)
-- 3.2: Right panel — proposed target tree, color-coded (green=copy, orange=duplicate, ⚠=collision/ambiguity)
-- 3.2: Issues panel below trees — one card per collision (both files editable), one card per ambiguity, each with Dismiss button
-- 3.2: Build button blocked until all issue cards dismissed
-- Collision cards show both the winner and renamed entry as editable name fields
+**Screen 3 (Review) — redesign agreed (2026-04-10):** ⏳ Iteration 11
+See prototype: `prototype/screen3-review.html`
+
+3.1 — Hashing progress:
+- Language: "Identifying duplicates…" / "Analysed X of Y files" (not "Hashing")
+- ETA: appears only after ~5 seconds of data ("About X minutes remaining")
+- Progress bar and text vertically centred in available space
+
+3.2 — Review/decisions (full redesign from current flat list):
+- Left panel: navigable folder tree (not flat file list), one collapsible root per source
+- Right panel: navigable merged target tree
+- Both panels interactive: exclude/include via right-click; changes reflected in both panels simultaneously
+- Excluded items remain visible in both panels — grey folder icon + grey strikethrough (not hidden)
+
+Visual indicator system (agreed 2026-04-10):
+- Issue-free files and folders: NO indicator
+- **Rectangle badge** (on folders): folder directly involved in an issue; cascades down
+  ancestor folders as a rectangle badge until reaching the folder with the issue
+  - Purple-blue (#5856d6) = folder similarity
+  - Teal = collision at folder level
+  - Orange = ambiguity at folder level
+- **Dot** (on files and cascade through folder ancestors to files): immediately right of name
+  - Teal = collision
+  - Orange = ambiguity
+- Folder containing a FILE issue in subtree: small coloured dot right of folder name (cascade aid)
+- Blue folder icon (#0e70c0) = clean/normal folder (macOS Finder style)
+- Grey folder icon = excluded or eliminated folder
+- Green dot = file will be copied (clean or duplicate winner — user does not need to distinguish)
+- Grey + strikethrough = file will not be copied (excluded or duplicate loser)
+
+Issues panel:
+- Cards stacked vertically, full width, scrollable
+- Each card: Dismiss button; "Show in tree" mini-list with one clickable link per affected
+  file/folder (e.g. "newsletter.doc in Born_2014 · newsletter.doc in Born_2011")
+- Hotlinks: badge/dot in tree → scrolls to card (flash highlight); card link → scrolls
+  tree to item (flash highlight)
+- Build button blocked until all cards dismissed
+
+Folder similarity (engine + UI — capability restored from Iteration 6):
+- Engine detects folders with same/similar relative path structure AND high content overlap
+- Card shows: both folder paths, file counts, overlap %, editable target folder name
+- Unique files from non-chosen folder are folded in automatically
+- User can right-click individual files in tree to exclude them from fold-in
+
+Penalty ranker reasoning restored:
+- Reasons why a file was chosen as duplicate winner surfaced in the UI (tooltip or card detail)
 
 **Screen 4 (Build) — locked design (2026-04-09):** ⏳ Iteration 11
 - Progress bar while build executes
@@ -155,13 +195,23 @@ Delivered:
 
 Screen 4 (Build) deferred to Iteration 11 — scope not yet fully agreed.
 
-### Iteration 11 — Screen 4 Build (next)
-**Goal:** Build screen with progress bar, completion summary, and Open in Finder.
-**See:** Screen 4 locked design above.
+### Iteration 11 — Screen 2 fixes + Screen 3.2 redesign (next)
+**Goal:** Fix Screen 2 issues; fully redesign Screen 3.2 per agreed prototype and design decisions.
+**Branch:** great-benz (continue) | **Starting version:** v0.6.6
+
+Scope:
+- Screen 2: always-visible ribbon scrollbar; "Keep this file" / "Keep all .[ext] files" context menu; folder exclusion visual cascade
+- Screen 3.1: language + ETA + layout improvements
+- Screen 3.2: navigable trees, full colour/indicator system, folder similarity engine + card, issues panel redesign, bi-directional hotlinks, penalty ranker reasoning surfaced
+- See prototype: `prototype/screen3-review.html`
+- See full design spec in Screen 2 and Screen 3 sections above
+
+Screen 4 (Build) remains deferred — scope not yet fully agreed.
 
 ### Future Iterations
-- **12** iPad/iPhone review client — open saved scans, approve/reject via document picker
-- **13** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
+- **12** Screen 4 Build — progress bar, completion summary, Open in Finder
+- **13** iPad/iPhone review client — open saved scans, approve/reject via document picker
+- **14** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
 
 ## Architecture
 
