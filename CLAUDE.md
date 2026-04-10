@@ -51,6 +51,13 @@ moving fast without regressions or dropped scope.
   `docs: update Iteration 9 locked design`). Any PR that changes agreed design must
   include the corresponding doc update.
 
+- **Explicitly call out regressions.** When a new design replaces an old one, produce a
+  "what we're dropping" list before writing any code and get explicit Product Owner
+  sign-off on each dropped capability. Never silently remove functionality that was
+  previously agreed and working. If a capability from a prior iteration is not carried
+  forward, it must be called out by name and either confirmed as intentionally dropped
+  or added back to scope.
+
 ## Commands
 
 ```bash
