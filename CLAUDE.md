@@ -112,15 +112,17 @@ targeted.
   override; does not un-exclude the extension globally
 - Exclusions (paths + extensions) passed to Scan 2
 
-**Screen 3 (Review) — locked design (2026-04-09):** ⏳ Iteration 10
-- Deterministic progress bar during scan — "Hashed X of Y files" (total from Scan 1)
-- Stats band (files to copy, duplicates, output size, sources)
-- Left: Source trees (read-only, browseable)
-- Right: Proposed target tree (color-coded: green=kept, orange=duplicate, ⚠=issue)
-- Ambiguity/collision panel below trees — one card per issue, scrollable
-- Build button blocked until all issues resolved or skipped
+**Screen 3 (Review) — locked design (2026-04-09):** ✅ Implemented (v0.6.6)
+- Sub-phases 3.1 (hashing) and 3.2 (review) handled within one widget
+- 3.1: Deterministic progress bar — "Hashed X of Y files" (total from Scan 1)
+- 3.2: Stats band (files to copy, duplicates, output size, issues count)
+- 3.2: Left panel — source trees, one collapsible section per source folder (read-only)
+- 3.2: Right panel — proposed target tree, color-coded (green=copy, orange=duplicate, ⚠=collision/ambiguity)
+- 3.2: Issues panel below trees — one card per collision (both files editable), one card per ambiguity, each with Dismiss button
+- 3.2: Build button blocked until all issue cards dismissed
+- Collision cards show both the winner and renamed entry as editable name fields
 
-**Screen 4 (Build) — locked design (2026-04-09):** ⏳ Iteration 10
+**Screen 4 (Build) — locked design (2026-04-09):** ⏳ Iteration 11
 - Progress bar while build executes
 - On completion: files copied, duplicates removed, output size, output path
 - "Open in Finder" button opens output folder in macOS Finder
@@ -132,14 +134,27 @@ targeted.
 
 **Reference docs:** `.claude/sessions/2026-04-08-iter9/architecture-design-v2.md`
 
-### Iteration 10 — Screens 3 + 4 (current)
-**Goal:** Complete the agreed 4-screen flow — Review and Build screens.
-**Branch:** great-benz | **Starting version:** v0.6.5
-**Scope:** See PR #117 for full details and next session prompt.
+### Iteration 10 — Screen 3 Review ✅ Complete (v0.6.6)
+**Goal:** Complete Screen 3 (Review) — the hashing progress + post-scan review layout.
+**Branch:** great-benz | **Delivered:** v0.6.6
+
+Delivered:
+- Deterministic hashing progress bar (totalFiles threaded from Scan 1)
+- Side-by-side source/target trees with color-coded status
+- Issues panel (collisions with both files editable, ambiguities with Dismiss)
+- Build button gated on all issues dismissed
+- widget_test updated to reflect Consolidate-only app
+- Screen 3 sub-phases named 3.1 (hashing) and 3.2 (review) in code comments
+
+Screen 4 (Build) deferred to Iteration 11 — scope not yet fully agreed.
+
+### Iteration 11 — Screen 4 Build (next)
+**Goal:** Build screen with progress bar, completion summary, and Open in Finder.
+**See:** Screen 4 locked design above.
 
 ### Future Iterations
-- **11** iPad/iPhone review client — open saved scans, approve/reject via document picker
-- **12** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
+- **12** iPad/iPhone review client — open saved scans, approve/reject via document picker
+- **13** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
 
 ## Architecture
 
