@@ -1,230 +1,175 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
+
+## How We Work Together
+
+We've learned what makes our sessions go well and what causes them to go off the rails.
+These are shared agreements — not bureaucracy, but the habits that keep us aligned and
+moving fast without regressions or dropped scope.
+
+- **Version bump on every UI change.** Any change the Product Owner needs to review
+  requires a patch bump in both `pubspec.yaml` and `lib/app_version.dart` *before*
+  launching. Format: `MAJOR.MINOR.PATCH` — PATCH for fixes/tweaks, MINOR for new
+  screens or significant features.
+
+- **Read before writing.** Before implementing any screen or feature, read all relevant
+  existing code, prior session docs, and design notes. Never invent UI patterns — check
+  what was designed and built in earlier iterations first. Do not regress work from
+  Iterations 1–8 without explicit concurrence from the Product Owner.
+
+- **Understand all feedback before writing code.** When the Product Owner gives UI
+  feedback, engage with each point — ask clarifying questions, propose solutions, show
+  mockups where needed. Do not write code until every feedback item is understood and
+  the approach is agreed. Never start fixing item 1 while items 2–5 are still being
+  discussed.
+
+- **Lock the design before implementing.** Agree the full design first — mockups,
+  discussion, whatever it takes. No partial implementations. No "let's see how this
+  looks" commits.
+
+- **Propose, don't build.** Do not add UI elements, controls, or behaviors that weren't
+  explicitly designed and agreed. If something seems useful, say so — then wait for the
+  go-ahead.
+
+- **Review open PRs at session start.** Before writing any code, run
+  `gh pr list --state open`. Close stale PRs with an explanation. Incorporate any
+  agreed but unmerged work into the current session scope. Do not open a new PR until
+  existing ones are resolved.
+
+- **Open a draft PR at session start.** Before writing any code, open a draft PR and
+  list the complete agreed scope in it. Check off each item explicitly before declaring
+  done. Never hold scope in context alone — write it down.
+
+- **Confirm the work list before coding.** Enumerate every agreed item, show it to the
+  Product Owner, and get explicit confirmation before starting. Do not start until the
+  list is confirmed complete.
+
+- **Keep docs current.** When a design is agreed or changed, update `CLAUDE.md` and
+  `docs/product-definition.md` in the same session. Never leave documentation describing
+  a superseded design. Commit doc changes separately with a clear message (e.g.
+  `docs: update Iteration 9 locked design`). Any PR that changes agreed design must
+  include the corresponding doc update.
 
 ## Commands
 
 ```bash
-# Build Rust core
-make rust-build
-# or: cargo build --manifest-path rust_core/Cargo.toml
-
-# Run the app (macOS)
-make flutter-run
-# or: flutter run -d macos
-
-# Run all tests (Rust build + Flutter tests)
-make check
-
-# Flutter tests only
-flutter test
-
-# Single Flutter test file
-flutter test test/manifest_service_test.dart
-
-# Single Flutter test by name
-flutter test test/manifest_service_test.dart -n "test name here"
-
-# Rust tests only
-cargo test --manifest-path rust_core/Cargo.toml
-
-# Single Rust test
-cargo test --manifest-path rust_core/Cargo.toml test_name_here
+make rust-build          # Build Rust core
+make flutter-run         # Run app (macOS)
+make check               # Rust build + all tests
+flutter test             # Flutter tests only
+flutter test test/foo.dart -n "test name"          # Single test
+cargo test --manifest-path rust_core/Cargo.toml test_name  # Single Rust test
 ```
 
-Always build Rust before running Flutter (`make rust-build` first) since Flutter invokes the Rust binary at runtime.
+Always build Rust before running Flutter — Flutter invokes the Rust binary at runtime.
 
 ## Product Vision
 
-FileSteward will ship as **two separate apps** sharing a common Rust engine. See `docs/product-definition.md` for the full definition.
-
-**FileSteward Maintain** *(current focus)*
-Rationalizes a single directory: fixes folder structure, removes duplicate files, enforces naming conventions. Builds a clean copy alongside the source; user confirms a swap when satisfied. Source is never modified until swap is explicitly confirmed.
-
-**FileSteward Consolidate** *(future)*
-Takes multiple similarly-structured directories and produces one canonical output. The latest source is the base; non-duplicate content from others is folded in. No swap — the output directory is the result.
-
-**Shared Rust engine** — directory walking, SHA-256 hashing, duplicate detection, build (copy with transformations). Restructure as a library is tracked in #79.
-
-It is **not** a bulk-delete tool; it is an analysis and decision-support tool. Every action is proposed and confirmed before execution.
-
-**Design principles:**
-- Safety over cleverness — default to analyze, recommend, confirm; never default to destructive action
-- Explainability over magic — every recommendation must show its basis (same hash, naming convention, etc.)
-- Engine first, UI second — the Rust core must be fully testable from CLI independent of any UI
-- **Rust owns all execution** — all filesystem operations are performed by the Rust engine; Flutter is UI only
-- Desktop first — macOS primary, Windows 11 secondary; iPad/iPhone for review only
-
-**Target platforms:** macOS (primary), Windows 11, iPadOS, iPhoneOS. No Android target.
-
-## Domain Model
-
-| Entity | Description |
-|--------|-------------|
-| `ScanSession` | One run of the scanner against a folder |
-| `Asset` | A file discovered during a scan |
-| `Fingerprint` | A SHA-256 content hash identifying file content |
-| `Finding` | A structural problem or duplicate group found during scan |
-| `DuplicateGroup` | Set of assets with identical fingerprints |
-| `ProposedAction` | Keep / rename / move / remove recommendation |
-| `ApprovalDecision` | Human confirmation of a proposed action |
-| `BuildResult` | Outcome of building the rationalized copy |
-| `SwapResult` | Outcome of the source ↔ copy swap |
-| `ExecutionLog` | Record of what was actually done and when |
+FileSteward takes multiple similarly-structured directories — such as successive backups
+— and produces one canonical output by rationalising folder structure, removing
+duplicates, and resolving naming conflicts. It is not a bulk-delete tool — every action
+is proposed and confirmed before execution. macOS primary; Windows 11, iPadOS, iPhoneOS
+targeted.
 
 ## Iteration Plan
 
-### Iteration 1 — CLI Engine + Manifest ✅ Complete
-- Rust recursive directory walker with metadata
-- JSON manifest output (relative path, type, size)
-- Flutter UI: folder selection, manifest display, filtering
-- GitHub Actions CI pipeline
-- Test corpus and Flutter unit tests
+### Iterations 1–8 ✅ Complete
+- **1** CLI engine + manifest (v0.1)
+- **2** SHA-256 hashing + duplicate detection + streaming (v0.2)
+- **3** Directory rationalisation — side-by-side trees, copy-then-swap (v0.3.5)
+- **4** Duplicate file detection — penalty ranker, ambiguous group resolution (v0.4.0)
+- **5** Consolidate v1 — primary/secondary model, fold-ins, session persistence (v0.5)
+- **6** Consolidate v2 — peer-folder model, per-folder rationalize+fold loop (v0.5.9)
+- **7** UX redesign planning — navigation model, wayfinding, review model redesign
+- **8** Consolidate UI polish — path truncation, bulk folder preference (v0.6.0)
 
-### Iteration 2 — Hashing, Duplicate Detection, Streaming ✅ Complete
-- SHA-256 file hashing in Rust (scoped by extension)
-- Exact duplicate detection: group files by hash
-- Duplicate groups exposed in JSON output
-- Streaming progress from Rust to Flutter UI
-- Flutter model and UI updates to show duplicate groups
+### Iteration 9 — 2-Scan Consolidate Redesign (current)
+**Goal:** Reduce user decisions from thousands to ~20–70.
+**Status:** In progress (branch: great-benz, v0.6.x)
 
-### Iteration 3 — Directory Rationalization ✅ Complete (v0.3.5)
-- Rationalize screen: side-by-side Original / Target directory trees
-- Findings engine: empty folders, naming inconsistencies, excessive nesting
-- Copy-then-swap safe execution model (source never modified until swap confirmed)
-- Naming engine: reserved words blocked, all-caps identifiers never renamed, date preservation
-- Right-click context menu: accept/reject findings, mark any folder for removal, bulk dismiss subtree
-- Build progress + results screen with stats (folders copied, files copied, omitted)
-- Splash screen with version number
-- Draft PR convention + CONTRIBUTING.md
+**LOCKED DESIGN: 4-Screen Flow**
 
-### Iteration 4 — Duplicate File Detection ✅ Complete (v0.4.0)
-- SHA-256 hashing wired into the rationalize scan
-- Penalty-based duplicate ranker: auto-resolves clear cases, flags ambiguous groups for user decision
-- Duplicate resolution panel below the tree: auto-resolved summary + keeper selection for ambiguous groups
-- Apply blocked until all ambiguous groups resolved
-- Build step omits non-kept duplicate copies via `duplicate_removals`
-- Collapsible/expandable folder nodes in both tree panels (depth ≥ 2 starts collapsed)
-- `docs/product-definition.md` updated to reflect Maintain-first approach and two-app vision
+| Screen | Step | Name | Purpose |
+|--------|------|------|---------|
+| 1 | Select | Source Selection | Pick 2–4 source folders |
+| 2 | Filter | Filter | Browse source trees; exclude file types/folders before hashing |
+| 3 | Review | Review | Side-by-side trees; resolve ambiguities before build |
+| 4 | Build  | Build  | Progress → completion summary + Open in Finder |
 
-### Iteration 5 — Consolidate v1 (current, in progress — PR #104)
-**Goal:** First working Consolidate flow. Primary/secondary model as a stepping stone.
+**Two-Scan Architecture:**
+- **Scan 1 (no hashing):** `consolidate_structure_scan` — walks sources, counts
+  files/types, detects shared folder structures. Powers Screen 2 (Filter).
+- **Scan 2 (full SHA-256):** `consolidate_content_scan` — hashes all non-excluded
+  files, deduplicates, detects collisions and ambiguities, produces routing plan.
+  Powers Screen 3 (Review).
 
-Done:
-- Multi-folder selection UI: one "primary" + up to two "secondaries"
-- Engine: Rayon parallel hashing, size pre-filter, system file filtering
-- Cross-folder diff: unique files per secondary (content not present in primary)
-- User reviews unique files per source; toggles Keep/Skip
-- Engine builds output directory (fold-ins only; no swap)
-- Scan resume: results persisted to `~/.filesteward/sessions.json`; resume card on re-open
-- Progress: linear bar, per-source status rows, elapsed MM:SS timer for scan + build
-- Overwrite warning dialog before build
-- Target directory: user-configurable location + name (auto-populated from primary)
-- Dangerous path guard (rejects volume roots and system directories)
-- Version shown in AppBar; splash screen removed
-- Rust binary bundled inside .app via Xcode Run Script build phase
-- Rust binary resolved from bundle-sibling path (`Contents/MacOS/rust_core`)
+**Screen 2 (Filter) — locked design:**
+- Left: Finder-style lazy tree per source folder (expandable, right-click to exclude)
+- Right: Merged target tree (live view of what will be consolidated)
+- File type ribbon: horizontally scrollable with left/right arrows + scrollbar underneath
+- "Include again" on extension-excluded file: re-includes that file only via path
+  override; does not un-exclude the extension globally
+- Exclusions (paths + extensions) passed to Scan 2
 
-### Iteration 6 — Consolidate v2: Per-Folder Orchestrated Rationalize + Fold ✅ Complete (v0.5.9)
+**Screen 3 (Review) — locked design (2026-04-09):**
+- Stats band (files to copy, duplicates, output size, sources)
+- Left: Source trees (read-only, browseable)
+- Right: Proposed target tree (color-coded: green=kept, orange=duplicate, ⚠=issue)
+- Ambiguity/collision panel below trees — one card per issue, scrollable
+- Build button blocked until all issues resolved or skipped
+- Deterministic progress bar during scan (total known from Scan 1)
 
-Done:
-- Peer-folder model replacing primary/secondary (Folder 1/2/3)
-- `consolidate_rationalize_scan` — walks one folder, detects internal duplicate groups,
-  ranks with penalty scorer, flags ambiguous cases
-- `consolidate_fold_scan` — diffs one folder against session's accumulated hash set
-- `consolidate_accumulate` — persists approved hashes to session registry after each review
-- `consolidate_v2_build` — copies all approved files from all folders into target
-- `penalty_score` in rationalize.rs made pub for reuse in consolidate.rs
-- SessionRecord gains `accumulated_hashes` + `folders` fields (backward-compatible)
-- Dart models, service methods, and screen redesigned for per-folder phase loop
-- Rust test: duplicate detection verified with temp fixture
+**Screen 4 (Build) — locked design (2026-04-09):**
+- Progress bar while build executes
+- On completion: files copied, duplicates removed, output size, output path
+- "Open in Finder" button opens output folder in macOS Finder
 
-**Note:** Review UX revealed as insufficient during testing (2026-04-03):
-- Fold review shows all files from Folder 1 (4484 files) because target starts empty — not useful
-- File-by-file review is unworkable at scale
-- Directory-level duplicate grouping needed (two folders with same content should offer a
-  folder-level keep/discard decision, not individual file decisions)
-- These issues drive the Iteration 7 redesign
+**Rust commands (implemented):**
+- `consolidate_structure_scan` — Scan 1
+- `consolidate_content_scan` — Scan 2
+- `consolidate_v3_build` — Build
 
-### Iteration 7 — UX Redesign: Navigation, Wayfinding, and Consolidate Review Model
+**Reference docs:** `.claude/sessions/2026-04-08-iter9/architecture-design-v2.md`
 
-**Two parallel tracks:**
-
-**Track A — App-wide UI/UX review**
-The app has accumulated screens and navigation patterns iteration by iteration without a
-coherent overall model. Before adding more features, conduct a full UI review:
-- Map all screens and flows (Rationalize + Consolidate end to end)
-- Define a consistent navigation model (forward/back/cancel, destructive vs recoverable)
-- Improve wayfinding — user should always know where they are, what's next, what was done
-- Ensure Rationalize and Consolidate feel like the same app
-- Review home screen entry point clarity
-
-**Track B — Consolidate review model redesign**
-Replace the per-folder flat file list with a smarter unified model:
-- Unified scan across all folders at once (single Rust command, not per-folder loop)
-- Folder similarity scoring: detect when two folders share high content overlap and offer
-  a folder-level keep/discard decision before file-level review
-- Penalty ranker auto-resolves clear duplicate cases silently
-- Ambiguous duplicates (equal score) surfaced for user input
-- Scope selection before hashing: folder tree with checkboxes to exclude dirs/file types
-- Unique files review only shows the meaningful delta
-
-Reusable pieces identified:
-- Rust: all hash/walk/diff/penalty functions, v2_build, accumulate
-- Dart: _TreeNode/_TreeNodeRow/_OriginalTreePanel from rationalize_screen (for scope selection)
-- Dart: _DuplicateGroupsPanel/_DuplicateGroupCard from rationalize_screen (for ambiguous groups)
-- Dart: _ReviewRow/_ReviewBottomBar, _BottomBar, _ErrorBanner, _buildBuilding, _buildResult
-
-### Iteration 8 — iPad/iPhone Review Client
-- Open saved scan, review groups, approve/reject recommendations
-- Focused scans via Apple document picker / security-scoped URLs
-- Sync saved scan state
-
-### Iteration 9 — Advanced UX + Performance
-- Visual topology of folders and duplicate clusters
-- Performance tuning for large external drives (100k+ files)
-- Rules engine: user-defined naming and placement rules
+### Future Iterations
+- **10** iPad/iPhone review client — open saved scans, approve/reject via document picker
+- **11** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
 
 ## Architecture
 
-**Stack:** Flutter/Dart (UI), Rust (file engine), JSON over stdout (integration boundary).
+**Stack:** Flutter/Dart (UI), Rust (file engine), JSON over stdout (IPC boundary).
+Rust owns all filesystem operations; Flutter is UI only.
 
-**Rationalize data flow:**
-1. User picks a folder; `RationalizeScreen` passes it to `RationalizeService`
-2. `RationalizeService` spawns the Rust binary as a subprocess, sends a `scan` command via stdin
-3. Rust walks the directory, generates findings, streams progress events and a `findings` payload to stdout
-4. Flutter parses events into `FindingsPayload` (`lib/rationalize_models.dart`)
-5. User reviews side-by-side Original/Target trees, accepts/rejects/marks findings
-6. On apply: `RationalizeService` sends a `build` command; Rust builds rationalized copy, streams progress
-7. On swap confirm: `RationalizeService` sends a `swap` command; Rust renames source → `.OLD`, copy → source
+**Consolidate data flow:**
+1. User selects source folders → `ConsolidateScreen` orchestrates 4-screen flow
+2. Scan 1: `ConsolidateService` spawns Rust, sends `consolidate_structure_scan` via stdin
+3. Scan 2: sends `consolidate_content_scan` with exclusions from Screen 2
+4. Screen 3 receives `ContentScanComplete` (routing, collisions, ambiguities)
+5. User resolves all ambiguities → `consolidate_v3_build` executes the routing plan
 
 **Rust binary resolution order:**
 1. `FILESTEWARD_RUST_BINARY` env var
-2. Sibling of the Flutter executable (`Contents/MacOS/rust_core` in .app bundle)
-3. `rust_core/target/debug/rust_core` (checked at 1–3 directory levels up)
-
-The Xcode project includes a "Copy Rust Binary" Run Script build phase that copies the debug
-(or release if available) Rust binary into `Contents/MacOS/` on every `flutter build macos`.
+2. Sibling of Flutter executable (`Contents/MacOS/rust_core` in .app bundle)
+3. `rust_core/target/debug/rust_core` (checked 1–3 directory levels up)
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `lib/main.dart` | App entry, home screen, folder selection, manifest display |
-| `lib/rationalize_screen.dart` | Full rationalize UI — scan, review, build, swap |
-| `lib/rationalize_service.dart` | Spawns Rust binary, manages scan/build/swap session |
-| `lib/rationalize_models.dart` | `FindingsPayload`, `RationalizeFinding`, `BuildResult`, `SwapResult` |
-| `lib/rationalize_events.dart` | Typed event stream from Rust (progress, findings, errors) |
-| `lib/manifest_service.dart` | Legacy manifest scan — spawns Rust binary, parses stdout JSON |
-| `lib/manifest_models.dart` | `ManifestEntry`, `ManifestResult` |
-| `lib/app_version.dart` | `kAppVersion` constant — keep in sync with `pubspec.yaml` |
-| `lib/consolidate_screen.dart` | Consolidate UI — source selection, scan, review, build, result |
-| `lib/consolidate_service.dart` | Spawns Rust binary in `consolidate` mode; streams NDJSON events |
+| `lib/main.dart` | App entry — launches ConsolidateScreen directly |
+| `lib/consolidate_screen.dart` | Orchestrates 4-screen Consolidate flow |
+| `lib/consolidate_scan1_screen.dart` | Screen 2: Filter (Finder-style trees) |
+| `lib/consolidate_scan2_screen.dart` | Screen 3: Review (scan progress + results) |
+| `lib/consolidate_build_confirm_screen.dart` | Screen 4: Build + completion summary |
+| `lib/consolidate_service.dart` | Spawns Rust binary; streams NDJSON events |
 | `lib/consolidate_models.dart` | Consolidate IPC models — events and commands |
-| `rust_core/src/consolidate.rs` | Consolidate engine — scan, diff, build, session registry |
-| `rust_core/src/rationalize.rs` | Rationalize engine — scan, findings, build, swap |
-| `rust_core/src/convention.rs` | Naming convention classification and rename suggestions |
-| `rust_core/src/main.rs` | Manifest scan path — walker, hashing, duplicate groups |
-| `test_corpus/` | Fixture folders used in Rust and Flutter tests |
-| `docs/product-definition.md` | Two-app product definition (Maintain + Consolidate) |
+| `lib/app_version.dart` | `kAppVersion` — keep in sync with `pubspec.yaml` |
+| `lib/rationalize_screen.dart` | Rationalise UI — used within Consolidate flow |
+| `lib/rationalize_service.dart` | Rationalise engine integration |
+| `rust_core/src/consolidate.rs` | Consolidate engine — scan, diff, build |
+| `rust_core/src/rationalize.rs` | Rationalise engine — scan, findings, swap |
+| `rust_core/src/convention.rs` | Naming convention classification |
+| `test_corpus/` | Fixture folders for Rust and Flutter tests |
+| `docs/product-definition.md` | Full product definition + domain model |
 | `CONTRIBUTING.md` | Branch model, PR workflow, draft PR convention |
