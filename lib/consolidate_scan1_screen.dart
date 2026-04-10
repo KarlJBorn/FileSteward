@@ -34,6 +34,7 @@ class ConsolidateScan1Screen extends StatefulWidget {
     required List<String> excludedExtensions,
     required List<String> excludedFolders,
     required List<String> overriddenPaths,
+    required int totalFiles,
   }) onProceed;
 
   final VoidCallback onBack;
@@ -166,6 +167,7 @@ class _ConsolidateScan1ScreenState extends State<ConsolidateScan1Screen> {
           .toList(),
       excludedFolders: excludedRelFolders.toList(),
       overriddenPaths: overriddenRel.toList(),
+      totalFiles: _result?.totalFiles ?? 0,
     );
   }
 

@@ -54,6 +54,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
   List<String> _excludedExtensions = [];
   List<String> _excludedFolders = [];
   List<String> _overriddenPaths = [];
+  int _scan1TotalFiles = 0;
   ContentScanComplete? _scanResult;
   Map<String, String> _collisionOverrides = {};
 
@@ -179,11 +180,13 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
     required List<String> excludedExtensions,
     required List<String> excludedFolders,
     required List<String> overriddenPaths,
+    required int totalFiles,
   }) {
     setState(() {
       _excludedExtensions = excludedExtensions;
       _excludedFolders = excludedFolders;
       _overriddenPaths = overriddenPaths;
+      _scan1TotalFiles = totalFiles;
       _phase = _Phase.scan2;
     });
   }
@@ -255,6 +258,7 @@ class _ConsolidateScreenState extends State<ConsolidateScreen> {
             excludedExtensions: _excludedExtensions,
             excludedFolders: _excludedFolders,
             overriddenPaths: _overriddenPaths,
+            totalFiles: _scan1TotalFiles,
             service: _service,
             onProceed: _onScan2Proceed,
             onBack: _goBackToScan1,
