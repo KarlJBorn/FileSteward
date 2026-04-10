@@ -84,9 +84,9 @@ targeted.
 - **7** UX redesign planning — navigation model, wayfinding, review model redesign
 - **8** Consolidate UI polish — path truncation, bulk folder preference (v0.6.0)
 
-### Iteration 9 — 2-Scan Consolidate Redesign (current)
+### Iteration 9 — 2-Scan Consolidate Redesign ✅ Complete (v0.6.5)
 **Goal:** Reduce user decisions from thousands to ~20–70.
-**Status:** In progress (branch: great-benz, v0.6.x)
+**Delivered:** Architecture redesign, Screen 1 (Select), Screen 2 (Filter)
 
 **LOCKED DESIGN: 4-Screen Flow**
 
@@ -104,7 +104,7 @@ targeted.
   files, deduplicates, detects collisions and ambiguities, produces routing plan.
   Powers Screen 3 (Review).
 
-**Screen 2 (Filter) — locked design:**
+**Screen 2 (Filter) — locked design:** ✅ Implemented
 - Left: Finder-style lazy tree per source folder (expandable, right-click to exclude)
 - Right: Merged target tree (live view of what will be consolidated)
 - File type ribbon: horizontally scrollable with left/right arrows + scrollbar underneath
@@ -112,15 +112,15 @@ targeted.
   override; does not un-exclude the extension globally
 - Exclusions (paths + extensions) passed to Scan 2
 
-**Screen 3 (Review) — locked design (2026-04-09):**
+**Screen 3 (Review) — locked design (2026-04-09):** ⏳ Iteration 10
+- Deterministic progress bar during scan — "Hashed X of Y files" (total from Scan 1)
 - Stats band (files to copy, duplicates, output size, sources)
 - Left: Source trees (read-only, browseable)
 - Right: Proposed target tree (color-coded: green=kept, orange=duplicate, ⚠=issue)
 - Ambiguity/collision panel below trees — one card per issue, scrollable
 - Build button blocked until all issues resolved or skipped
-- Deterministic progress bar during scan (total known from Scan 1)
 
-**Screen 4 (Build) — locked design (2026-04-09):**
+**Screen 4 (Build) — locked design (2026-04-09):** ⏳ Iteration 10
 - Progress bar while build executes
 - On completion: files copied, duplicates removed, output size, output path
 - "Open in Finder" button opens output folder in macOS Finder
@@ -132,9 +132,14 @@ targeted.
 
 **Reference docs:** `.claude/sessions/2026-04-08-iter9/architecture-design-v2.md`
 
+### Iteration 10 — Screens 3 + 4 (current)
+**Goal:** Complete the agreed 4-screen flow — Review and Build screens.
+**Branch:** great-benz | **Starting version:** v0.6.5
+**Scope:** See PR #117 for full details and next session prompt.
+
 ### Future Iterations
-- **10** iPad/iPhone review client — open saved scans, approve/reject via document picker
-- **11** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
+- **11** iPad/iPhone review client — open saved scans, approve/reject via document picker
+- **12** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
 
 ## Architecture
 
