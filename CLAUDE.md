@@ -195,16 +195,27 @@ Delivered:
 
 Screen 4 (Build) deferred to Iteration 11 — scope not yet fully agreed.
 
-### Iteration 11 — Screen 2 fixes + Screen 3.2 redesign (next)
+### Iteration 11 — Screen 2 fixes + Screen 3.2 redesign 🔄 In Progress (v0.6.7)
 **Goal:** Fix Screen 2 issues; fully redesign Screen 3.2 per agreed prototype and design decisions.
 **Branch:** great-benz (continue) | **Starting version:** v0.6.6
 
-Scope:
-- Screen 2: always-visible ribbon scrollbar; "Keep this file" / "Keep all .[ext] files" context menu; folder exclusion visual cascade
-- Screen 3.1: language + ETA + layout improvements
-- Screen 3.2: navigable trees, full colour/indicator system, folder similarity engine + card, issues panel redesign, bi-directional hotlinks, penalty ranker reasoning surfaced
-- See prototype: `prototype/screen3-review.html`
-- See full design spec in Screen 2 and Screen 3 sections above
+Delivered so far (v0.6.7):
+- ✅ Screen 2: always-visible ribbon scrollbar
+- ✅ Screen 2: "Keep this file" / "Keep all .[ext] files" context menu on excluded items
+- ✅ Screen 2: folder exclusion visual cascade to all descendants
+- ✅ Screen 3.1: language ("Identifying duplicates…" / "Analysed X of Y files"), ETA after 5s, centred layout
+- ✅ Screen 3.2: navigable folder trees in both Source and Proposed Output panels
+- ✅ Screen 3.2: colour indicator system — teal dot = collision, green dot = clean copy,
+  grey + strikethrough = duplicate loser, cascade dot on ancestor folders
+- ✅ Screen 3.2: issues panel redesign — full-width vertical scrollable cards, "Show in tree"
+  mini-lists, hotlink (dot tap → scrolls to card), highlighted card border on tap
+
+Deferred to follow-on (requires Rust engine work):
+- ⏳ Screen 3.2: folder similarity engine + UI card (Rust `consolidate_content_scan` needs
+  folder-similarity detection; Flutter scaffolding ready to receive it)
+- ⏳ Screen 3.2: penalty ranker reasoning surfaced in UI (Rust must return reason strings)
+
+See prototype: `prototype/screen3-review.html`
 
 Screen 4 (Build) remains deferred — scope not yet fully agreed.
 

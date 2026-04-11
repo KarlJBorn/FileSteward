@@ -12,7 +12,7 @@ void main() {
 
     // App bar shows title and version.
     expect(find.text('FileSteward'), findsOneWidget);
-    expect(find.text('v$kAppVersion'), findsOneWidget);
+    expect(find.text('v$kAppVersion'), findsOneWidget); // v0.6.7
 
     // Step progress bar labels are visible.
     expect(find.text('Select'), findsOneWidget);

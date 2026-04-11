@@ -122,6 +122,9 @@ class _ConsolidateScan1ScreenState extends State<ConsolidateScan1Screen> {
   // ext has leading dot, e.g. '.jpg'
   void _excludeExt(String ext) => setState(() => _excludedExtensions.add(ext));
 
+  // Removes ext from excluded list — restores the ribbon chip to blue.
+  void _includeExt(String ext) => setState(() => _excludedExtensions.remove(ext));
+
   // Called from the ribbon chips — extNoDot has no leading dot (from Rust).
   void _toggleRibbonExtension(String extNoDot) {
     final ext = '.$extNoDot';
@@ -349,40 +352,49 @@ class _ConsolidateScan1ScreenState extends State<ConsolidateScan1Screen> {
                 icon: const Icon(Icons.chevron_left),
                 iconSize: 18,
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 46),
                 onPressed: scrollLeft,
                 tooltip: 'Scroll left',
               ),
               Expanded(
-                child: SizedBox(
-                  height: 34,
-                  child: ListView.separated(
-                    controller: _ribbonController,
-                    scrollDirection: Axis.horizontal,
-                    itemCount: types.length,
-                    separatorBuilder: (context, i) => const SizedBox(width: 6),
-                    itemBuilder: (context, i) {
-                      final ft = types[i];
-                      final excluded = _excludedExtensions.contains('.${ft.extension}');
-                      return FilterChip(
-                        label: Text(
-                          '.${ft.extension}  ${ft.count}',
-                          style: TextStyle(
-                              fontSize: 11, color: excluded ? Colors.grey : null),
-                        ),
-                        selected: !excluded,
-                        onSelected: (_) => _toggleRibbonExtension(ft.extension),
-                        showCheckmark: false,
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
-                        selectedColor: Colors.blue.shade50,
-                        side: BorderSide(
-                          color: excluded
-                              ? Colors.grey.shade300
-                              : Colors.blue.shade200,
-                        ),
-                      );
-                    },
+                child: Scrollbar(
+                  controller: _ribbonController,
+                  thumbVisibility: true,
+                  child: SizedBox(
+                    // Extra bottom padding gives the scrollbar room to render
+                    // below the chips without overlapping them.
+                    height: 46,
+                    child: ListView.separated(
+                      controller: _ribbonController,
+                      scrollDirection: Axis.horizontal,
+                      itemCount: types.length,
+                      separatorBuilder: (context, i) => const SizedBox(width: 6),
+                      itemBuilder: (context, i) {
+                        final ft = types[i];
+                        final excluded = _excludedExtensions.contains('.${ft.extension}');
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: FilterChip(
+                            label: Text(
+                              '.${ft.extension}  ${ft.count}',
+                              style: TextStyle(
+                                  fontSize: 11, color: excluded ? Colors.grey : null),
+                            ),
+                            selected: !excluded,
+                            onSelected: (_) => _toggleRibbonExtension(ft.extension),
+                            showCheckmark: false,
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            selectedColor: Colors.blue.shade50,
+                            side: BorderSide(
+                              color: excluded
+                                  ? Colors.grey.shade300
+                                  : Colors.blue.shade200,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -390,20 +402,11 @@ class _ConsolidateScan1ScreenState extends State<ConsolidateScan1Screen> {
                 icon: const Icon(Icons.chevron_right),
                 iconSize: 18,
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 46),
                 onPressed: scrollRight,
                 tooltip: 'Scroll right',
               ),
             ],
-          ),
-          // Scrollbar beneath chips
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 28),
-            child: Scrollbar(
-              controller: _ribbonController,
-              thumbVisibility: true,
-              child: const SizedBox(height: 8),
-            ),
           ),
         ],
       ),
@@ -444,6 +447,7 @@ class _ConsolidateScan1ScreenState extends State<ConsolidateScan1Screen> {
                         onExcludePath: _excludePath,
                         onIncludePath: _includePath,
                         onExcludeExt: _excludeExt,
+                        onIncludeExt: _includeExt,
                       ),
                   ],
                 ),
@@ -468,6 +472,7 @@ class _ConsolidateScan1ScreenState extends State<ConsolidateScan1Screen> {
                   onExcludePath: _excludePath,
                   onIncludePath: _includePath,
                   onExcludeExt: _excludeExt,
+                  onIncludeExt: _includeExt,
                 ),
               ),
             ],
@@ -571,7 +576,7 @@ class _MergedNode {
 }
 
 /// Actions available on a tree node context menu.
-enum _TreeAction { excludeFile, excludeExt, excludeFolder, include }
+enum _TreeAction { excludeFile, excludeExt, excludeFolder, include, includeExt }
 
 // ---------------------------------------------------------------------------
 // Lazy directory loader helpers
@@ -656,6 +661,7 @@ class _SourceTreePanel extends StatefulWidget {
   final void Function(String) onExcludePath;
   final void Function(String) onIncludePath;
   final void Function(String) onExcludeExt;
+  final void Function(String) onIncludeExt;
 
   const _SourceTreePanel({
     super.key,
@@ -668,6 +674,7 @@ class _SourceTreePanel extends StatefulWidget {
     required this.onExcludePath,
     required this.onIncludePath,
     required this.onExcludeExt,
+    required this.onIncludeExt,
   });
 
   @override
@@ -744,6 +751,18 @@ class _SourceTreePanelState extends State<_SourceTreePanel> {
     );
   }
 
+  /// Returns true if [path] or any of its ancestor paths is in [excludedPaths].
+  bool _isAncestorOrSelfExcluded(String path) {
+    if (widget.excludedPaths.contains(path)) return true;
+    // Walk up the path segments checking each ancestor.
+    final parts = path.split('/');
+    for (var i = parts.length - 1; i > 0; i--) {
+      final ancestor = parts.sublist(0, i).join('/');
+      if (widget.excludedPaths.contains(ancestor)) return true;
+    }
+    return false;
+  }
+
   List<Widget> _buildNodeList(List<_SourceNode> nodes, {required int depth}) {
     final widgets = <Widget>[];
     for (final node in nodes) {
@@ -752,7 +771,7 @@ class _SourceTreePanelState extends State<_SourceTreePanel> {
           : node.name.contains('.')
               ? '.${node.name.split('.').last.toLowerCase()}'
               : '';
-      final isExcluded = (widget.excludedPaths.contains(node.path) ||
+      final isExcluded = (_isAncestorOrSelfExcluded(node.path) ||
           (!node.isDir && widget.excludedExtensions.contains(ext))) &&
           !widget.includedPaths.contains(node.path);
 
@@ -777,10 +796,19 @@ class _SourceTreePanelState extends State<_SourceTreePanel> {
 
   List<PopupMenuEntry<_TreeAction>> _contextItems(
       _SourceNode node, bool isExcluded, String ext) {
+    // File excluded by extension — offer both single-file and extension-level re-include.
+    final isExtExcluded = ext.isNotEmpty &&
+        widget.excludedExtensions.contains(ext) &&
+        !widget.includedPaths.contains(node.path);
+
     if (isExcluded) {
       return [
         const PopupMenuItem(
-            value: _TreeAction.include, child: Text('Include again')),
+            value: _TreeAction.include, child: Text('Keep this file')),
+        if (isExtExcluded)
+          PopupMenuItem(
+              value: _TreeAction.includeExt,
+              child: Text('Keep all $ext files')),
       ];
     }
     if (node.isDir) {
@@ -809,6 +837,8 @@ class _SourceTreePanelState extends State<_SourceTreePanel> {
         widget.onExcludeExt(ext);
       case _TreeAction.include:
         widget.onIncludePath(node.path);
+      case _TreeAction.includeExt:
+        widget.onIncludeExt(ext);
     }
   }
 }
@@ -826,6 +856,7 @@ class _MergedTreePanel extends StatefulWidget {
   final void Function(String) onExcludePath;
   final void Function(String) onIncludePath;
   final void Function(String) onExcludeExt;
+  final void Function(String) onIncludeExt;
 
   const _MergedTreePanel({
     super.key,
@@ -837,6 +868,7 @@ class _MergedTreePanel extends StatefulWidget {
     required this.onExcludePath,
     required this.onIncludePath,
     required this.onExcludeExt,
+    required this.onIncludeExt,
   });
 
   @override
@@ -861,6 +893,16 @@ class _MergedTreePanelState extends State<_MergedTreePanel> {
     });
   }
 
+  bool _isAncestorOrSelfExcluded(String absPath) {
+    if (widget.excludedPaths.contains(absPath)) return true;
+    final parts = absPath.split('/');
+    for (var i = parts.length - 1; i > 0; i--) {
+      final ancestor = parts.sublist(0, i).join('/');
+      if (widget.excludedPaths.contains(ancestor)) return true;
+    }
+    return false;
+  }
+
   bool _isExcluded(_MergedNode node) {
     final ext = node.isDir
         ? ''
@@ -871,7 +913,8 @@ class _MergedTreePanelState extends State<_MergedTreePanel> {
         node.sourceIndices.map((i) => '${widget.folders[i]}/${node.relPath}').toList();
     // A path-level include override beats any exclusion.
     if (allSourcePaths.any((p) => widget.includedPaths.contains(p))) return false;
-    if (allSourcePaths.every((p) => widget.excludedPaths.contains(p))) return true;
+    // Excluded if every source path (or any ancestor) is excluded.
+    if (allSourcePaths.every((p) => _isAncestorOrSelfExcluded(p))) return true;
     if (!node.isDir && widget.excludedExtensions.contains(ext)) return true;
     return false;
   }
@@ -930,10 +973,17 @@ class _MergedTreePanelState extends State<_MergedTreePanel> {
 
   List<PopupMenuEntry<_TreeAction>> _contextItems(
       _MergedNode node, bool excluded, String ext) {
+    final isExtExcluded = ext.isNotEmpty &&
+        widget.excludedExtensions.contains(ext);
+
     if (excluded) {
       return [
         const PopupMenuItem(
-            value: _TreeAction.include, child: Text('Include again')),
+            value: _TreeAction.include, child: Text('Keep this file')),
+        if (isExtExcluded)
+          PopupMenuItem(
+              value: _TreeAction.includeExt,
+              child: Text('Keep all $ext files')),
       ];
     }
     if (node.isDir) {
@@ -966,6 +1016,8 @@ class _MergedTreePanelState extends State<_MergedTreePanel> {
         for (final i in node.sourceIndices) {
           widget.onIncludePath('${widget.folders[i]}/${node.relPath}');
         }
+      case _TreeAction.includeExt:
+        widget.onIncludeExt(ext);
     }
   }
 }
