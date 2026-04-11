@@ -2029,6 +2029,7 @@ mod tests {
             ],
             excluded_extensions: vec![],
             excluded_folders: vec![],
+            overridden_paths: vec![],
         };
 
         // Hash all files to verify dedup logic.
@@ -2095,6 +2096,7 @@ mod tests {
             ],
             excluded_extensions: vec![],
             excluded_folders: vec![],
+            overridden_paths: vec![],
         };
         handle_content_scan(cmd);
     }
