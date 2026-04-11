@@ -257,6 +257,23 @@ Screen 4 (Build) remains deferred — scope not yet fully agreed.
   has files to copy, dropped if empty; root-level folder wrapper from source
   (e.g. `Born_Family_2012`) is stripped; non-root hierarchy preserved intact
 
+**Screen 4 (Build/Result):**
+- "Start Build" button is wrong — build should begin when user clicks "Build" on Screen 3;
+  Screen 4 should show progress on arrival, then the result summary
+- Result summary screen (output structure with navigable target folder, file counts, sizes)
+  is the right design — show it AFTER build completes, not before
+- Screen 4 title says "Step 3: Review & Build" — should be "Step 4: Build"
+- Build progress screen causes window to go black and become invisible — app process
+  stays alive but window lost; build DID complete (target folder confirmed created);
+  result screen never visible — bug needs investigation
+- Back from Screen 4 re-triggers full content hash scan — `_scanResult` is held in
+  orchestrator but not passed back to `ConsolidateScan2Screen` on `_goBackToScan2()`;
+  fix: accept optional `initialResult` parameter, skip `_runScan()` when present
+
+**Working practices:**
+- Write state to disk continuously — update CLAUDE.md and commit after every significant
+  decision or discovery; never rely on conversation memory alone to survive a context limit
+
 **Deferred (requires Rust engine work):**
 - Folder similarity engine + UI card
 - Penalty ranker reasoning surfaced in UI
