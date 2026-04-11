@@ -220,26 +220,45 @@ See prototype: `prototype/screen3-review.html`
 Screen 4 (Build) remains deferred — scope not yet fully agreed.
 
 ### Iteration 12 — Bug fixes + Screen 2/3 polish (next)
-**Goal:** Fix blocking scan bug, add `make run`, and address UI polish from v0.6.7 review session.
+**Goal:** Fix blocking scan bug, add `make run`, and address UI/engine issues from v0.6.7 review.
 
 **Priority bug:**
 - `make run` target — kills existing instances and launches with
   `FILESTEWARD_RUST_BINARY` set to `rust_core/target/debug/rust_core`;
   prevents the bundled binary hang (macOS TCC blocks the .app bundle binary
-  from reading user folders selected via file picker; workaround confirmed working)
+  from reading user folders; workaround confirmed working)
 
-**Screen 2 (Filter) — issues from review:**
-- Structure scan: no elapsed timer (regression — was present before)
+**Screen 2 (Filter):**
+- Structure scan: no elapsed timer (regression)
 - Structure scan: spinner only; no progress bar
-- "Shared Structures: 0" metric is misleading — hide it or relabel until
-  folder similarity engine is built (exact-path match never fires in practice)
+- "Shared Structures: 0" metric misleading — hide until folder similarity engine built
 - Source folder header rows: full path truncated; needs tooltip or wider layout
-- Coloured dots on files/folders have no meaning before hashing; remove from Screen 2
-- File type sort order: common types (.jpg, .doc, .pdf) should lead;
-  deferred until settings screen is designed
+- Coloured dots on files/folders meaningless before hashing — remove from Screen 2
+- File type sort order: common types (.jpg, .doc, .pdf) should lead (deferred to settings)
+
+**Screen 3.1 (Hashing progress):**
+- Progress counter jumps — Rust batches events; add smooth animation between updates
+- ETA badly wrong — simple rate estimate doesn't account for variable file sizes
+  (large videos skew it heavily); needs improvement or wider confidence band
+
+**Screen 3.2 (Review):**
+- Dot indicators on wrong side — move to LEFT of file row, before file icon
+- Collapsed folder state lost when parent is toggled — child expand/collapse state
+  must survive parent collapse/re-expand
+- Sources panel: folder with 0 files (all duplicates) should show full structure
+  with all files and folders crossed out so user can see what was dropped and
+  optionally restore items
+- Proposed Output: empty folders (all contents are duplicates) should be shown
+  crossed out, not as live folders
+- Same-named folders across sources not merged in output (e.g. "My Pictures"
+  appears separately per source instead of consolidating) — requires Rust routing fix
+- Photo routing engine not working: photo files outside a Pictures folder should
+  be routed to `My Pictures/<owning folder>/<file>`; owning folder preserved if it
+  has files to copy, dropped if empty; root-level folder wrapper from source
+  (e.g. `Born_Family_2012`) is stripped; non-root hierarchy preserved intact
 
 **Deferred (requires Rust engine work):**
-- Folder similarity engine + UI card (Rust `consolidate_content_scan`)
+- Folder similarity engine + UI card
 - Penalty ranker reasoning surfaced in UI
 
 ### Future Iterations
