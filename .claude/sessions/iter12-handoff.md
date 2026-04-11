@@ -49,13 +49,28 @@ on completion.
 Fix: Add optional `initialResult` parameter to `ConsolidateScan2Screen`; skip `_runScan()`
 when `initialResult` is present.
 
-### 4. Screen 3.2 — dot indicators on wrong side
+### 4. Screen 3.2 — same-named folders not merged in Proposed Output
+
+"My Pictures" appears as a separate node per source folder instead of being merged into
+one "My Pictures" in the output. Requires Rust routing fix: when two source folders
+produce output files under the same target folder name, they must be merged into a single
+node, not duplicated. This is a correctness issue — the whole point of Consolidate is to
+produce one unified output, not parallel trees.
+
+### 5. Screen 3.2 — empty output folders should be crossed out
+
+When every file in a folder is a duplicate (all files shown as crossed out), the folder
+node itself should also be rendered crossed out / greyed — not as a live active folder.
+"Alex's Birthday" appeared as a real-looking output folder even though it would contain
+nothing. User found this misleading and confusing.
+
+### 6. Screen 3.2 — dot indicators on wrong side
 
 Dots are currently rendered to the RIGHT of the file icon. They must be on the LEFT —
-before the file icon, not after the file name. This is a layout change in
+before the file icon, not after the file name. Layout change in
 `_TreeNodeRow._buildFile()` in `lib/consolidate_scan2_screen.dart`.
 
-### 5. Screen 3.2 — collapsed state lost on parent toggle
+### 7. Screen 3.2 — collapsed state lost on parent toggle
 
 When a parent folder is collapsed and re-expanded, its children lose their individual
 expand/collapse state. `ValueKey(child.path)` is already passed but state resets.
@@ -64,24 +79,37 @@ Investigate whether `_TreeNodeRow` subtree widgets are being unmounted on parent
 May need to hoist child expanded-state to the parent `_TreeNode` rather than holding it
 in widget state.
 
-### 6. Screen 2 — elapsed timer missing (regression)
+### 8. Screen 3.2 — Sources panel: all-duplicate folder should show crossed-out structure
 
-The structure scan screen has no elapsed timer. Previous iterations had an `MM:SS`
+When a source folder has zero files surviving (all are duplicates), it currently shows as
+empty or missing. It should show the full folder structure with every file and folder node
+crossed out, so the user can see what was dropped and optionally choose to restore items.
+User specifically raised: "a user might want to restore them at this point."
+
+### 9. Screen 3.1 — progress counter jumps; ETA unreliable
+
+Progress counter jumps because Rust batches events. Add smooth animation between updates.
+ETA is badly wrong on variable file sizes (large videos skew it heavily). Needs improvement
+or a wider confidence band / "about X minutes" phrasing that degrades gracefully.
+
+### 10. Screen 2 — elapsed timer missing (regression)
+
+The structure scan screen has no elapsed timer. Previous iterations had a `MM:SS`
 elapsed counter. Add it back to `ConsolidateScan1Screen`
 (`lib/consolidate_scan1_screen.dart`).
 
-### 7. Screen 2 — remove pre-hash dots
+### 11. Screen 2 — remove pre-hash dots
 
 Coloured dots on file/folder rows are meaningless before content hashing. Remove them
 from Screen 2 (structure scan only). They should only appear on Screen 3.2 after
 content scan is complete.
 
-### 8. Screen 2 — hide "Shared Structures: 0" metric
+### 12. Screen 2 — hide "Shared Structures: 0" metric
 
 The "Shared Structures" metric is always 0 until the folder similarity engine is built
 (deferred). Hide it until that engine exists.
 
-### 9. Screen 4 — "Start Build" button removal
+### 13. Screen 4 — "Start Build" button removal and title fix
 
 The "Start Build" button is wrong. Build begins when the user clicks "Build" on Screen 3.
 Screen 4 should show progress immediately on arrival, then the result summary.
@@ -100,6 +128,8 @@ Also fix: Screen 4 title reads "Step 3: Review & Build" — should be "Step 4: B
 - Commit CLAUDE.md after every significant decision (Key Decisions subsection in the
   current iteration section)
 - Keep this PR as a draft until Karl confirms the UI is good in a live review
+- **Warn Karl when approaching context limit** so we can wrap up cleanly — do not let
+  context run out mid-task without flagging it first
 
 ## Key files
 
@@ -119,7 +149,7 @@ Also fix: Screen 4 title reads "Step 3: Review & Build" — should be "Step 4: B
 
 ```bash
 make rust-build
-# Add make run target first, then:
+# Add make run target first (item 1 above), then:
 make run
 ```
 
