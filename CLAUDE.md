@@ -69,12 +69,13 @@ moving fast without regressions or dropped scope.
      the merge is confirmed.
   2. **Retrospective** — walk through what went well, what went badly, and process
      improvements. Product Owner drives the observations; Claude captures them.
-     Agreed process changes are written to this document before proceeding.
+     Agreed process changes are written to this document. The retrospective is then
+     added to the closing iteration's PR description before the PR is merged.
   3. **Next session prep** — cut the new iteration branch, produce the handoff prompt
      following the structure in `memory/handoff_standard.md`, and commit it to the new
      branch as the first commit. Open a draft PR for the new iteration with the handoff
-     as its initial description. Product Owner reviews and confirms before the session
-     ends. The new PR is the starting point for the next session.
+     as its description. Product Owner reviews and confirms before the session ends.
+     The new draft PR is the starting point for the next session.
 
 ## Commands
 
