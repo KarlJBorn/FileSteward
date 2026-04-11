@@ -219,10 +219,33 @@ See prototype: `prototype/screen3-review.html`
 
 Screen 4 (Build) remains deferred — scope not yet fully agreed.
 
+### Iteration 12 — Bug fixes + Screen 2/3 polish (next)
+**Goal:** Fix blocking scan bug, add `make run`, and address UI polish from v0.6.7 review session.
+
+**Priority bug:**
+- `make run` target — kills existing instances and launches with
+  `FILESTEWARD_RUST_BINARY` set to `rust_core/target/debug/rust_core`;
+  prevents the bundled binary hang (macOS TCC blocks the .app bundle binary
+  from reading user folders selected via file picker; workaround confirmed working)
+
+**Screen 2 (Filter) — issues from review:**
+- Structure scan: no elapsed timer (regression — was present before)
+- Structure scan: spinner only; no progress bar
+- "Shared Structures: 0" metric is misleading — hide it or relabel until
+  folder similarity engine is built (exact-path match never fires in practice)
+- Source folder header rows: full path truncated; needs tooltip or wider layout
+- Coloured dots on files/folders have no meaning before hashing; remove from Screen 2
+- File type sort order: common types (.jpg, .doc, .pdf) should lead;
+  deferred until settings screen is designed
+
+**Deferred (requires Rust engine work):**
+- Folder similarity engine + UI card (Rust `consolidate_content_scan`)
+- Penalty ranker reasoning surfaced in UI
+
 ### Future Iterations
-- **12** Screen 4 Build — progress bar, completion summary, Open in Finder
-- **13** iPad/iPhone review client — open saved scans, approve/reject via document picker
-- **14** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
+- **13** Screen 4 Build — progress bar, completion summary, Open in Finder
+- **14** iPad/iPhone review client — open saved scans, approve/reject via document picker
+- **15** Advanced UX + performance — visual topology, 100k+ file tuning, rules engine
 
 ## Architecture
 
