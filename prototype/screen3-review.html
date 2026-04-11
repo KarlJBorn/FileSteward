@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FileSteward — Review</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f5f5f7;
+    --panel-bg: #ffffff;
+    --border: #d1d1d6;
+    --border-light: #e5e5ea;
+    --accent: #0e70c0;
+    --text-primary: #1c1c1e;
+    --text-secondary: #3c3c43;
+    --text-tertiary: #8e8e93;
+    --green: #34c759;
+    --orange: #ff9500;
+    --amber: #ffcc00;
+    --red: #ff3b30;
+    --grey: #8e8e93;
+    --blue-folder: #0e70c0;
+    --teal-folder: #0a7764;
+    --purple-folder: #7b3fb5;
+    --purple-badge: #5856d6;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    --font-mono: "SF Mono", "Monaco", "Menlo", monospace;
+    --radius: 8px;
+    --appbar-height: 88px;
+    --issues-height: 280px;
+    --bottombar-height: 52px;
+  }
+
+  html, body {
+    height: 100%;
+    font-family: var(--font);
+    font-size: 13px;
+    color: var(--text-primary);
+    background: var(--bg);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--bg);
+  }
+
+  /* AppBar */
+  .appbar {
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 0 20px;
+    flex-shrink: 0;
+    height: var(--appbar-height);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 10px;
+    position: relative;
+  }
+  .appbar-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .appbar-title {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.2px;
+    color: var(--text-primary);
+  }
+  .appbar-version {
+    position: absolute;
+    right: 0;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-weight: 400;
+  }
+  .traffic-lights {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    gap: 6px;
+  }
+  .tl { width: 12px; height: 12px; border-radius: 50%; }
+  .tl-red { background: #ff5f57; }
+  .tl-yellow { background: #febc2e; }
+  .tl-green { background: #28c840; }
+
+  /* Step bar */
+  .step-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+  }
+  .step-circle {
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border);
+    background: var(--panel-bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+  .step.done .step-circle { background: var(--green); border-color: var(--green); color: white; }
+  .step.active .step-circle { background: var(--accent); border-color: var(--accent); color: white; }
+  .step-label { color: var(--text-tertiary); white-space: nowrap; }
+  .step.done .step-label { color: var(--text-secondary); }
+  .step.active .step-label { color: var(--accent); font-weight: 600; }
+  .step-connector { width: 32px; height: 1.5px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+  .step-connector.done { background: var(--green); }
+
+  /* Stats band */
+  .stats-band {
+    flex-shrink: 0;
+    padding: 8px 16px;
+    background: var(--bg);
+  }
+  .stats-card {
+    background: #f0faf4;
+    border: 1px solid #c8e6d4;
+    border-radius: var(--radius);
+    padding: 8px 20px;
+    display: flex;
+    align-items: center;
+  }
+  .stat-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+  }
+  .stat-item + .stat-item { border-left: 1px solid var(--border-light); }
+  .stat-value { font-size: 17px; font-weight: 700; letter-spacing: -0.4px; line-height: 1.2; }
+  .stat-label { font-size: 10.5px; color: var(--text-tertiary); font-weight: 400; }
+  .stat-green { color: #1a7a3a; }
+  .stat-orange { color: #b85c00; }
+  .stat-blue { color: var(--accent); }
+  .stat-amber { color: #8a6800; }
+
+  /* Body */
+  .body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 0 16px;
+    gap: 8px;
+  }
+
+  /* Two-panel row */
+  .panels-row {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 0;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .panel { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .panel + .panel { border-left: 1px solid var(--border); }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border-light);
+    background: #fafafa;
+    flex-shrink: 0;
+  }
+  .panel-header-icon { font-size: 14px; color: var(--text-secondary); }
+  .panel-header-title { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); letter-spacing: -0.1px; }
+  .panel-scroll {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 4px 0;
+  }
+  .panel-scroll::-webkit-scrollbar { width: 6px; }
+  .panel-scroll::-webkit-scrollbar-track { background: transparent; }
+  .panel-scroll::-webkit-scrollbar-thumb { background: #c7c7cc; border-radius: 3px; }
+
+  /* Tree */
+  .tree-row {
+    display: flex;
+    align-items: center;
+    padding: 2px 0;
+    cursor: default;
+    border-radius: 4px;
+    position: relative;
+  }
+  .tree-row:hover { background: #f2f2f7; }
+  .tree-row.highlight-flash {
+    animation: rowFlash 1.2s ease;
+  }
+  @keyframes rowFlash {
+    0%   { background: #fff9cc; }
+    30%  { background: #fff3aa; }
+    100% { background: transparent; }
+  }
+
+  .tree-chevron {
+    width: 16px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    font-size: 9px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: transform 0.15s ease;
+  }
+  .tree-chevron.open { transform: rotate(90deg); }
+  .tree-chevron.leaf { color: transparent; cursor: default; }
+
+  .tree-icon { font-size: 13px; margin-right: 4px; flex-shrink: 0; }
+
+  .tree-label {
+    flex: 1;
+    font-size: 12.5px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 26px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .tree-label-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tree-label.excluded .tree-label-text { color: var(--grey); text-decoration: line-through; }
+  .tree-label.file-grey .tree-label-text { color: var(--grey); text-decoration: line-through; }
+
+  /* Cascade indicator dot on folders */
+  .cascade-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: inline-block;
+    margin-left: 4px;
+    vertical-align: middle;
+    cursor: pointer;
+  }
+  .cascade-dot-amber { background: var(--amber); }
+  .cascade-dot-orange { background: var(--orange); }
+  .cascade-dot-purple { background: var(--purple-badge); }
+
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .dot-green { background: var(--green); }
+  .dot-orange { background: var(--orange); }
+  .dot-amber { background: var(--amber); }
+  .dot-grey { background: var(--grey); opacity: 0.4; }
+
+  /* Grey file icon for excluded/skipped files */
+  .file-icon-grey {
+    font-size: 13px;
+    margin-right: 4px;
+    flex-shrink: 0;
+    opacity: 0.4;
+    filter: grayscale(1);
+  }
+
+  /* "linked" amber indicator on files — clickable */
+  .amber-indicator {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--amber);
+    cursor: pointer;
+  }
+
+  /* Source root header */
+  .source-root-row {
+    display: flex;
+    align-items: center;
+    padding: 3px 0 1px;
+    cursor: default;
+  }
+  .source-root-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 6px 2px 0;
+  }
+  .source-blue { color: var(--blue-folder); }
+  .source-teal { color: var(--teal-folder); }
+  .source-purple { color: var(--purple-folder); }
+  .source-root-divider { height: 1px; background: var(--border-light); margin: 2px 8px; }
+
+  /* Issues panel — vertical scroll, cards stacked */
+  .issues-section {
+    flex-shrink: 0;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    height: var(--issues-height);
+  }
+  .issues-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border-light);
+    background: #fffcf0;
+    flex-shrink: 0;
+  }
+  .issues-header-icon { font-size: 13px; }
+  .issues-header-title { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); flex: 1; }
+  .issues-counter { font-size: 11.5px; color: var(--text-tertiary); font-weight: 500; }
+
+  /* Vertical scroll container — cards stack as a column */
+  .issues-scroll {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 12px;
+  }
+  .issues-scroll::-webkit-scrollbar { width: 6px; }
+  .issues-scroll::-webkit-scrollbar-thumb { background: #c7c7cc; border-radius: 3px; }
+
+  /* Card flash highlight */
+  .issue-card.card-flash {
+    animation: cardFlash 1.4s ease;
+  }
+  @keyframes cardFlash {
+    0%   { background: #fff9cc; box-shadow: 0 0 0 2px #ffcc00; }
+    40%  { background: #fff3aa; box-shadow: 0 0 0 2px #ffcc00; }
+    100% { background: white;   box-shadow: none; }
+  }
+
+  /* Issue cards — full width, stacked vertically */
+  .issue-card {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: white;
+    display: flex;
+    flex-direction: column;
+    transition: opacity 0.2s;
+    flex-shrink: 0;
+  }
+  .issue-card.dismissed { opacity: 0.45; }
+  .issue-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px 6px;
+    border-bottom: 1px solid var(--border-light);
+    background: #fafafa;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+  .issue-card-icon { font-size: 12px; }
+  .issue-card-title { flex: 1; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+  .btn-dismiss {
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: white;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: var(--font);
+    transition: background 0.1s;
+    white-space: nowrap;
+    pointer-events: all;
+  }
+  .btn-dismiss:hover { background: #f0f0f5; }
+  .btn-reopen {
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 5px;
+    border: 1px solid var(--accent);
+    background: white;
+    color: var(--accent);
+    cursor: pointer;
+    font-family: var(--font);
+    pointer-events: all;
+    white-space: nowrap;
+  }
+  .btn-reopen:hover { background: #e8f2fb; }
+  .card-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+
+  /* Show-in-tree link */
+  .show-in-tree-link {
+    font-size: 10.5px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--font);
+    white-space: nowrap;
+  }
+  .show-in-tree-link:hover { color: #0a5ea3; }
+
+  /* Similarity card */
+  .folder-compare { display: flex; align-items: flex-start; gap: 8px; }
+  .folder-compare-item {
+    flex: 1;
+    background: #f5f5f7;
+    border-radius: 5px;
+    padding: 5px 8px;
+  }
+  .folder-compare-path { font-size: 11px; color: var(--text-tertiary); line-height: 1.3; }
+  .folder-compare-path strong { display: block; font-size: 12px; font-weight: 600; color: var(--text-primary); }
+  .folder-compare-meta { font-size: 10.5px; color: var(--text-tertiary); margin-top: 2px; }
+  .folder-compare-vs {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 700;
+    color: #b85c00;
+    align-self: center;
+    background: #fff4e0;
+    border: 1px solid #f5d49a;
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+  .card-desc { font-size: 11.5px; color: var(--text-secondary); line-height: 1.45; }
+  .card-field-row { display: flex; align-items: center; gap: 8px; }
+  .card-field-label { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
+  .card-field-input {
+    flex: 1;
+    font-size: 12px;
+    font-family: var(--font);
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-primary);
+    background: white;
+    outline: none;
+    max-width: 150px;
+  }
+  .card-field-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(14,112,192,0.15); }
+  .card-note {
+    font-size: 11px;
+    color: var(--teal-folder);
+    background: #edf9f3;
+    border-radius: 4px;
+    padding: 3px 8px;
+    border: 1px solid #b8e4cc;
+  }
+
+  /* Collision card */
+  .collision-row { display: flex; align-items: center; gap: 6px; }
+  .collision-source-tag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .tag-blue { background: #ddeeff; color: var(--blue-folder); }
+  .tag-teal { background: #d8f5ef; color: var(--teal-folder); }
+  .collision-input {
+    flex: 1;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-primary);
+    background: white;
+    outline: none;
+  }
+  .collision-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(14,112,192,0.15); }
+  .collision-renamed-badge {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #fff4e0;
+    color: #8a5a00;
+    border: 1px solid #f5d49a;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Bottom bar */
+  .bottom-bar {
+    flex-shrink: 0;
+    height: var(--bottombar-height);
+    background: var(--panel-bg);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 12px;
+  }
+  .bottom-status { flex: 1; font-size: 12px; color: var(--text-tertiary); }
+  .bottom-status span { font-weight: 600; color: var(--text-secondary); }
+  .btn-build {
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font);
+    padding: 7px 22px;
+    border-radius: 7px;
+    border: none;
+    cursor: pointer;
+    background: var(--accent);
+    color: white;
+    transition: background 0.15s, opacity 0.15s;
+    letter-spacing: -0.1px;
+  }
+  .btn-build:hover:not(:disabled) { background: #0a5ea3; }
+  .btn-build:disabled { background: #c7c7cc; cursor: not-allowed; }
+
+  /* Context menu */
+  .context-menu {
+    position: fixed;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.14), 0 1px 4px rgba(0,0,0,0.08);
+    padding: 4px 0;
+    z-index: 9999;
+    min-width: 190px;
+    display: none;
+  }
+  .context-menu.visible { display: block; }
+  .ctx-item {
+    padding: 6px 14px;
+    font-size: 12.5px;
+    cursor: pointer;
+    color: var(--text-primary);
+  }
+  .ctx-item:hover { background: var(--accent); color: white; }
+  .ctx-divider { height: 1px; background: var(--border-light); margin: 3px 0; }
+
+  /* Tooltip */
+  .tooltip {
+    position: fixed;
+    background: rgba(28,28,30,0.93);
+    color: white;
+    font-size: 11px;
+    padding: 4px 9px;
+    border-radius: 5px;
+    pointer-events: none;
+    z-index: 9998;
+    white-space: nowrap;
+    display: none;
+  }
+  .tooltip.visible { display: block; }
+</style>
+</head>
+<body>
+<div class="app-shell">
+
+  <!-- AppBar -->
+  <div class="appbar">
+    <div class="appbar-title-row">
+      <div class="traffic-lights">
+        <div class="tl tl-red"></div>
+        <div class="tl tl-yellow"></div>
+        <div class="tl tl-green"></div>
+      </div>
+      <span class="appbar-title">FileSteward</span>
+      <span class="appbar-version">v0.6.6</span>
+    </div>
+    <div class="step-bar">
+      <div class="step done">
+        <div class="step-circle">&#10003;</div>
+        <span class="step-label">Select</span>
+      </div>
+      <div class="step-connector done"></div>
+      <div class="step done">
+        <div class="step-circle">&#10003;</div>
+        <span class="step-label">Filter</span>
+      </div>
+      <div class="step-connector done"></div>
+      <div class="step active">
+        <div class="step-circle">3</div>
+        <span class="step-label">Review</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step">
+        <div class="step-circle">4</div>
+        <span class="step-label">Build</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats band -->
+  <div class="stats-band">
+    <div class="stats-card">
+      <div class="stat-item">
+        <span class="stat-value stat-green">13,261</span>
+        <span class="stat-label">To Copy</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value stat-orange">18,294</span>
+        <span class="stat-label">Duplicates</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value stat-blue">35.1 GB</span>
+        <span class="stat-label">Output Size</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value stat-amber">2</span>
+        <span class="stat-label">Issues</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Body -->
+  <div class="body">
+
+    <!-- Panels -->
+    <div class="panels-row">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-header-icon">&#128193;</span>
+          <span class="panel-header-title">Sources</span>
+        </div>
+        <div class="panel-scroll" id="left-panel"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-header-icon">&#128194;</span>
+          <span class="panel-header-title">Proposed Output</span>
+        </div>
+        <div class="panel-scroll" id="right-panel"></div>
+      </div>
+    </div>
+
+    <!-- Issues — vertical column, scrollable -->
+    <div class="issues-section">
+      <div class="issues-header">
+        <span class="issues-header-icon">&#9888;&#65039;</span>
+        <span class="issues-header-title" id="issues-title">2 issues — dismiss all to enable Build</span>
+        <span class="issues-counter" id="issues-counter">0 / 2 dismissed</span>
+      </div>
+      <div class="issues-scroll" id="issues-scroll">
+
+        <!-- Card 1: Folder similarity -->
+        <div class="issue-card" id="card-similarity">
+          <div class="issue-card-header">
+            <span class="issue-card-icon">&#128194;</span>
+            <span class="issue-card-title">Similar folders detected</span>
+            <button class="show-in-tree-link" onclick="showSimilarityInTree()" style="margin-right:8px;">Show in tree</button>
+            <button class="btn-dismiss" id="btn-similarity" onclick="toggleCard('similarity')">Dismiss</button>
+          </div>
+          <div class="card-body">
+            <div class="folder-compare">
+              <div class="folder-compare-item">
+                <div class="folder-compare-path">
+                  <span style="font-size:10px;color:var(--blue-folder);font-weight:600;">Born_Family_2014_02_02</span>
+                  <strong>My Pictures/</strong>
+                </div>
+                <div class="folder-compare-meta">312 files &middot; 4.2 GB</div>
+              </div>
+              <div class="folder-compare-vs">89%</div>
+              <div class="folder-compare-item">
+                <div class="folder-compare-path">
+                  <span style="font-size:10px;color:var(--teal-folder);font-weight:600;">Born_Family_2011_11_24</span>
+                  <strong>My Pictures 2012/</strong>
+                </div>
+                <div class="folder-compare-meta">287 files &middot; 3.8 GB</div>
+              </div>
+            </div>
+            <div class="card-desc">These folders appear to contain the same content. Select a target folder name &mdash; unique files from both will be included.</div>
+            <div class="card-field-row">
+              <span class="card-field-label">Target folder name:</span>
+              <input class="card-field-input" type="text" value="Pictures" placeholder="folder name">
+            </div>
+            <div class="card-note">25 unique files from My Pictures 2012 will be folded in</div>
+          </div>
+        </div>
+
+        <!-- Card 2: Filename collision -->
+        <div class="issue-card" id="card-collision">
+          <div class="issue-card-header">
+            <span class="issue-card-icon">&#9888;&#65039;</span>
+            <span class="issue-card-title">Name conflict: Documents/Letters/newsletter.doc</span>
+            <button class="show-in-tree-link" onclick="showCollisionInTree()" style="margin-right:8px;">Show in tree</button>
+            <button class="btn-dismiss" id="btn-collision" onclick="toggleCard('collision')">Dismiss</button>
+          </div>
+          <div class="card-body">
+            <div style="font-size:11.5px;color:var(--text-secondary);margin-bottom:2px;">Two files with the same name will be written to the same output path. Rename one to continue.</div>
+            <div class="collision-row">
+              <span class="collision-source-tag tag-blue">2014_02_02</span>
+              <input class="collision-input" type="text" value="newsletter.doc">
+            </div>
+            <div class="collision-row">
+              <span class="collision-source-tag tag-teal">2011_11_24</span>
+              <input class="collision-input" type="text" value="newsletter_1.doc">
+              <span class="collision-renamed-badge">auto-renamed</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="bottom-bar">
+      <span class="bottom-status" id="bottom-status">
+        Resolve <span>2 issues</span> to proceed
+      </span>
+      <button class="btn-build" id="btn-build" disabled>Build</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- Context menu -->
+<div class="context-menu" id="ctx-menu">
+  <div class="ctx-item" id="ctx-action-item" onclick="doContextAction()">
+    <span id="ctx-action-label">Exclude this folder</span>
+  </div>
+  <div class="ctx-divider"></div>
+  <div class="ctx-item" style="color:var(--text-tertiary);" onclick="hideCtxMenu()">Cancel</div>
+</div>
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+const excludedIds = new Set();
+const dismissedCards = new Set();
+let ctxNodeId = null;
+let ctxIsFolder = false;
+let ctxCurrentlyExcluded = false;
+let ctxFromPanel = 'left'; // which panel triggered the context menu
+
+// ─── Folder SVG helpers ───────────────────────────────────────────────────────
+// Blue folder (normal)
+const FOLDER_BLUE_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="#0e70c0" style="display:inline-block;vertical-align:-2px;flex-shrink:0;"><path d="M1 3a1 1 0 011-1h3.5l1 1.5H12a1 1 0 011 1V11a1 1 0 01-1 1H2a1 1 0 01-1-1V3z"/></svg>';
+// Grey folder (excluded)
+const FOLDER_GREY_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="#8e8e93" style="display:inline-block;vertical-align:-2px;flex-shrink:0;"><path d="M1 3a1 1 0 011-1h3.5l1 1.5H12a1 1 0 011 1V11a1 1 0 01-1 1H2a1 1 0 01-1-1V3z"/></svg>';
+
+// ─── Tree data ────────────────────────────────────────────────────────────────
+// dot values:
+//   'green'  = clean file / duplicate winner
+//   'orange' = ambiguity (duplicate, equal score)
+//   'amber'  = collision
+//   'grey'   = excluded / duplicate loser / skipped
+// skipFile: true = grey strikethrough, no coloured dot (duplicate loser)
+// collisionLink: true = amber dot, clickable to collision card
+// winnerTip: non-empty = "Selected from N identical copies" suffix
+// similarityLink: true = purple cascade on folder row
+const leftTree = [
+  { id:'s1', type:'root', label:'Born_Family_2014_02_02', cls:'source-blue', children:[
+    { id:'s1-docs', type:'folder', label:'Documents', children:[
+      { id:'s1-docs-letters', type:'folder', label:'Letters', children:[
+        { id:'s1-docs-l-f1', type:'file', label:'newsletter.doc', dot:'amber', collisionLink:true, tip:'Name conflict with Born_Family_2011_11_24 / Documents/Letters/newsletter.doc' },
+        { id:'s1-docs-l-f2', type:'file', label:'family_letter_2014.docx', dot:'green', tip:'From: Born_Family_2014_02_02' },
+        { id:'s1-docs-l-f3', type:'file', label:'christmas_2013.docx', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      ]},
+      { id:'s1-docs-f1', type:'file', label:'budget_2014.xlsx', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'s1-docs-f2', type:'file', label:'notes.doc', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2011_11_24 / Documents/notes.doc' },
+    ]},
+    { id:'s1-pics', type:'folder', label:'My Pictures', similarityLink:true, children:[
+      { id:'s1-pics-2000', type:'folder', label:'2000', children:[
+        { id:'s1-p2000-f1', type:'file', label:'IMG_0001.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+        { id:'s1-p2000-f2', type:'file', label:'IMG_0002.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+        { id:'s1-p2000-f3', type:'file', label:'IMG_0003.jpg', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2011_11_24 / My Pictures 2012/2000/IMG_0003.jpg' },
+      ]},
+      { id:'s1-pics-2001', type:'folder', label:'2001', children:[
+        { id:'s1-p2001-f1', type:'file', label:'vacation_01.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+        { id:'s1-p2001-f2', type:'file', label:'vacation_02.jpg', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2012_04_01 / My Pictures/2001/vacation_02.jpg' },
+      ]},
+      { id:'s1-pics-2002', type:'folder', label:'2002', children:[
+        { id:'s1-p2002-f1', type:'file', label:'birthday_party.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+        { id:'s1-p2002-f2', type:'file', label:'holiday_2002.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      ]},
+    ]},
+    { id:'s1-youcam', type:'folder', label:'Youcam', initExcluded:true, children:[
+      { id:'s1-yc-f1', type:'file', label:'capture001.jpg', initExcluded:true },
+      { id:'s1-yc-f2', type:'file', label:'capture002.jpg', initExcluded:true },
+      { id:'s1-yc-f3', type:'file', label:'capture003.jpg', initExcluded:true },
+      { id:'s1-yc-effects', type:'folder', label:'Effects', initExcluded:true, children:[
+        { id:'s1-yc-e-f1', type:'file', label:'effect_001.png', initExcluded:true },
+      ]},
+    ]},
+  ]},
+  { id:'s2', type:'root', label:'Born_Family_2011_11_24', cls:'source-teal', children:[
+    { id:'s2-docs', type:'folder', label:'Documents', children:[
+      { id:'s2-docs-letters', type:'folder', label:'Letters', children:[
+        { id:'s2-docs-l-f1', type:'file', label:'newsletter.doc', dot:'amber', collisionLink:true, tip:'Name conflict with Born_Family_2014_02_02 / Documents/Letters/newsletter.doc' },
+        { id:'s2-docs-l-f2', type:'file', label:'reunion_invite.doc', dot:'green', tip:'From: Born_Family_2011_11_24' },
+      ]},
+      { id:'s2-docs-f1', type:'file', label:'notes.doc', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2014_02_02 / Documents/notes.doc' },
+      { id:'s2-docs-f2', type:'file', label:'recipes.docx', dot:'green', tip:'From: Born_Family_2011_11_24' },
+    ]},
+    { id:'s2-pics', type:'folder', label:'My Pictures 2012', similarityLink:true, children:[
+      { id:'s2-pics-2000', type:'folder', label:'2000', children:[
+        { id:'s2-p2000-f1', type:'file', label:'IMG_0003.jpg', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2014_02_02 / My Pictures/2000/IMG_0003.jpg' },
+        { id:'s2-p2000-f2', type:'file', label:'IMG_0004.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+        { id:'s2-p2000-f3', type:'file', label:'IMG_0005.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+      ]},
+      { id:'s2-pics-2001', type:'folder', label:'2001', children:[
+        { id:'s2-p2001-f1', type:'file', label:'school_photo.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+        { id:'s2-p2001-f2', type:'file', label:'xmas_2001.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+      ]},
+    ]},
+  ]},
+  { id:'s3', type:'root', label:'Born_Family_2012_04_01', cls:'source-purple', children:[
+    { id:'s3-docs', type:'folder', label:'Documents', children:[
+      { id:'s3-docs-f1', type:'file', label:'tax_2012.pdf', dot:'green', tip:'From: Born_Family_2012_04_01' },
+      { id:'s3-docs-f2', type:'file', label:'insurance.doc', dot:'green', tip:'From: Born_Family_2012_04_01' },
+    ]},
+    { id:'s3-pics', type:'folder', label:'My Pictures', children:[
+      { id:'s3-pics-2001', type:'folder', label:'2001', children:[
+        { id:'s3-p2001-f1', type:'file', label:'vacation_02.jpg', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2014_02_02 / My Pictures/2001/vacation_02.jpg' },
+        { id:'s3-p2001-f2', type:'file', label:'beach_2001.jpg', dot:'green', tip:'From: Born_Family_2012_04_01' },
+      ]},
+      { id:'s3-pics-2002', type:'folder', label:'2002', children:[
+        { id:'s3-p2002-f1', type:'file', label:'spring_picnic.jpg', dot:'green', tip:'From: Born_Family_2012_04_01' },
+        { id:'s3-p2002-f2', type:'file', label:'easter_2002.jpg', dot:'orange', tip:'Duplicate ambiguity: also in Born_Family_2014_02_02 / My Pictures/2002/holiday_2002.jpg' },
+      ]},
+    ]},
+  ]},
+];
+
+// Right panel: skipFile = true means grey strikethrough (duplicate loser)
+// winnerCount: show "Selected from N identical copies" if >1
+const rightTree = [
+  { id:'r-docs', type:'folder', label:'Documents', children:[
+    { id:'r-docs-letters', type:'folder', label:'Letters', children:[
+      { id:'r-dl-f1', type:'file', label:'newsletter.doc', dot:'amber', collisionLink:true, tip:'Name conflict — see Issues panel' },
+      { id:'r-dl-f2', type:'file', label:'newsletter_1.doc', dot:'amber', collisionLink:true, tip:'Auto-renamed from newsletter.doc (Born_Family_2011_11_24)' },
+      { id:'r-dl-f3', type:'file', label:'family_letter_2014.docx', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'r-dl-f4', type:'file', label:'christmas_2013.docx', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'r-dl-f5', type:'file', label:'reunion_invite.doc', dot:'green', tip:'From: Born_Family_2011_11_24' },
+    ]},
+    { id:'r-docs-f1', type:'file', label:'budget_2014.xlsx', dot:'green', tip:'From: Born_Family_2014_02_02' },
+    { id:'r-docs-f2', type:'file', label:'notes.doc', dot:'green', winnerCount:2, tip:'From: Born_Family_2014_02_02' },
+    { id:'r-docs-f3', type:'file', label:'recipes.docx', dot:'green', tip:'From: Born_Family_2011_11_24' },
+    { id:'r-docs-f4', type:'file', label:'tax_2012.pdf', dot:'green', tip:'From: Born_Family_2012_04_01' },
+    { id:'r-docs-f5', type:'file', label:'insurance.doc', dot:'green', tip:'From: Born_Family_2012_04_01' },
+  ]},
+  { id:'r-pics', type:'folder', label:'Pictures', note:'Merged from My Pictures + My Pictures 2012', similarityLink:true, children:[
+    { id:'r-pics-2000', type:'folder', label:'2000', children:[
+      { id:'r-p2000-f1', type:'file', label:'IMG_0001.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2000-f2', type:'file', label:'IMG_0002.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2000-f3', type:'file', label:'IMG_0003.jpg', dot:'green', winnerCount:2, tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2000-f4', type:'file', label:'IMG_0004.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+      { id:'r-p2000-f5', type:'file', label:'IMG_0005.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+    ]},
+    { id:'r-pics-2001', type:'folder', label:'2001', children:[
+      { id:'r-p2001-f1', type:'file', label:'vacation_01.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2001-f2', type:'file', label:'vacation_02.jpg', dot:'green', winnerCount:2, tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2001-f3', type:'file', label:'school_photo.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+      { id:'r-p2001-f4', type:'file', label:'xmas_2001.jpg', dot:'green', tip:'From: Born_Family_2011_11_24' },
+      { id:'r-p2001-f5', type:'file', label:'beach_2001.jpg', dot:'green', tip:'From: Born_Family_2012_04_01' },
+    ]},
+    { id:'r-pics-2002', type:'folder', label:'2002', children:[
+      { id:'r-p2002-f1', type:'file', label:'birthday_party.jpg', dot:'green', tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2002-f2', type:'file', label:'holiday_2002.jpg', dot:'green', winnerCount:2, tip:'From: Born_Family_2014_02_02' },
+      { id:'r-p2002-f3', type:'file', label:'spring_picnic.jpg', dot:'green', tip:'From: Born_Family_2012_04_01' },
+    ]},
+  ]},
+];
+
+// ─── Cascade computation ──────────────────────────────────────────────────────
+// Walk tree, collect set of cascade types for each node id
+// Returns Map<nodeId, Set<'amber'|'orange'|'purple'>>
+function computeCascade(nodes) {
+  const result = new Map();
+
+  function walk(node) {
+    const mine = new Set();
+
+    if (node.type === 'file') {
+      if (node.collisionLink) mine.add('amber');
+      if (node.dot === 'orange') mine.add('orange');
+    }
+    if (node.similarityLink) mine.add('purple');
+
+    if (node.children) {
+      node.children.forEach(c => {
+        const childSet = walk(c);
+        childSet.forEach(t => mine.add(t));
+      });
+    }
+
+    result.set(node.id, mine);
+    return mine;
+  }
+
+  nodes.forEach(n => walk(n));
+  return result;
+}
+
+let leftCascade, rightCascade;
+
+// ─── Excluded set initialisation ─────────────────────────────────────────────
+function initExcluded(nodes) {
+  nodes.forEach(n => {
+    if (n.initExcluded) excludedIds.add(n.id);
+    if (n.children) initExcluded(n.children);
+  });
+}
+initExcluded(leftTree);
+
+// ─── Open/collapsed state ─────────────────────────────────────────────────────
+const openNodes = new Set([
+  's1','s2','s3',
+  's1-docs','s1-docs-letters','s1-pics',
+  's1-pics-2000','s1-pics-2001','s1-pics-2002',
+  's1-youcam',
+  's2-docs','s2-docs-letters','s2-pics',
+  's2-pics-2000','s2-pics-2001',
+  's3-docs','s3-pics','s3-pics-2001','s3-pics-2002',
+  'r-docs','r-docs-letters','r-pics',
+  'r-pics-2000','r-pics-2001','r-pics-2002',
+]);
+
+// ─── File icon helper ─────────────────────────────────────────────────────────
+function fileEmoji(label) {
+  const ext = (label.split('.').pop() || '').toLowerCase();
+  if (['jpg','jpeg','png','gif','bmp'].includes(ext)) return '\uD83D\uDDBC'; // 🖼
+  if (['doc','docx'].includes(ext)) return '\uD83D\uDCDD'; // 📝
+  if (ext === 'pdf') return '\uD83D\uDCC4'; // 📄
+  if (ext === 'xlsx') return '\uD83D\uDCCA'; // 📊
+  return '\uD83D\uDCC4';
+}
+
+// ─── Excluded: find all nodes that mirror a given ID across both trees ────────
+// When a node is excluded/included in one panel, we sync by ID across all trees.
+// For the right panel, we map left-source excluded folders to their output equivalents
+// by matching label. This is a prototype approximation.
+
+// Build a flat map from label -> rightTree node ids for folder sync
+function buildLabelToRightIds(nodes, map) {
+  nodes.forEach(n => {
+    if (n.type === 'folder' || n.type === 'file') {
+      if (!map[n.label]) map[n.label] = [];
+      map[n.label].push(n.id);
+    }
+    if (n.children) buildLabelToRightIds(n.children, map);
+  });
+  return map;
+}
+
+// ─── Render ────────────────────────────────────────────────────────────────────
+function renderTree(nodes, container, depth, parentExcluded, cascadeMap) {
+  nodes.forEach(node => {
+    const excl = parentExcluded || excludedIds.has(node.id);
+
+    if (node.type === 'root') {
+      // Source root row
+      const row = document.createElement('div');
+      row.className = 'source-root-row';
+      row.style.paddingLeft = (depth * 16 + 8) + 'px';
+
+      const chev = document.createElement('span');
+      chev.className = 'tree-chevron' + (openNodes.has(node.id) ? ' open' : '');
+      chev.textContent = '\u25B6';
+      chev.onclick = e => { e.stopPropagation(); toggle(node.id); };
+
+      const lbl = document.createElement('span');
+      lbl.className = 'source-root-label ' + node.cls;
+      lbl.textContent = node.label;
+
+      row.appendChild(chev);
+      row.appendChild(lbl);
+      container.appendChild(row);
+
+      if (openNodes.has(node.id) && node.children) {
+        renderTree(node.children, container, depth + 1, excl, cascadeMap);
+      }
+      return;
+    }
+
+    // Normal folder/file row
+    const row = document.createElement('div');
+    row.className = 'tree-row';
+    row.id = 'row-' + node.id;
+    row.dataset.id = node.id;
+    row.dataset.isFolder = node.type === 'folder' ? '1' : '0';
+    row.style.paddingLeft = (depth * 16 + 4) + 'px';
+
+    // Chevron
+    const chev = document.createElement('span');
+    if (node.type === 'folder') {
+      chev.className = 'tree-chevron' + (openNodes.has(node.id) ? ' open' : '');
+      chev.textContent = '\u25B6';
+      chev.onclick = e => { e.stopPropagation(); toggle(node.id); };
+    } else {
+      chev.className = 'tree-chevron leaf';
+      chev.textContent = '\u25B6';
+    }
+    row.appendChild(chev);
+
+    // Icon
+    const icon = document.createElement('span');
+    icon.className = 'tree-icon';
+    icon.style.marginRight = '4px';
+    if (node.type === 'folder') {
+      // Blue folder for normal, grey for excluded (Youcam and descendants)
+      icon.innerHTML = excl ? FOLDER_GREY_SVG : FOLDER_BLUE_SVG;
+    } else {
+      // For excluded or skipped files: greyed-out emoji
+      icon.textContent = fileEmoji(node.label);
+      if (excl) {
+        icon.style.opacity = '0.35';
+        icon.style.filter = 'grayscale(1)';
+      }
+    }
+    row.appendChild(icon);
+
+    // Label container (flex row)
+    const lblWrap = document.createElement('span');
+    // Determine label state
+    let lblClass = 'tree-label';
+    if (excl) lblClass += ' excluded';
+
+    lblWrap.className = lblClass;
+
+    const lblText = document.createElement('span');
+    lblText.className = 'tree-label-text';
+    lblText.textContent = node.label;
+    lblWrap.appendChild(lblText);
+
+    if (node.type === 'folder') {
+      // Merge badge (right panel only)
+      if (node.note) {
+        const badge = document.createElement('span');
+        badge.title = node.note;
+        badge.style.cssText = 'display:inline-flex;margin-left:6px;font-size:10px;color:var(--teal-folder);background:#eaf7f2;border:1px solid #b2e4d0;border-radius:3px;padding:1px 4px;font-weight:500;white-space:nowrap;cursor:pointer;flex-shrink:0;';
+        badge.textContent = 'merged';
+        badge.addEventListener('click', e => { e.stopPropagation(); scrollToCard('similarity'); });
+        lblWrap.appendChild(badge);
+      }
+
+      // Cascade dots on folders (only if not excluded)
+      if (!excl && cascadeMap) {
+        const cascSet = cascadeMap.get(node.id);
+        if (cascSet && cascSet.size > 0) {
+          const dotOrder = ['amber','orange','purple'];
+          dotOrder.forEach(type => {
+            if (cascSet.has(type)) {
+              const cdot = document.createElement('span');
+              cdot.className = 'cascade-dot cascade-dot-' + type;
+              cdot.title = type === 'amber' ? 'Name conflict inside' : type === 'orange' ? 'Ambiguous duplicate inside' : 'Similar folder';
+              cdot.style.flexShrink = '0';
+              cdot.addEventListener('click', e => {
+                e.stopPropagation();
+                if (type === 'amber') scrollToCard('collision');
+                else if (type === 'orange') scrollToCard('similarity');
+                else if (type === 'purple') scrollToCard('similarity');
+              });
+              lblWrap.appendChild(cdot);
+            }
+          });
+        }
+      }
+    }
+
+    row.appendChild(lblWrap);
+
+    // File indicators (dots)
+    if (node.type === 'file') {
+      if (excl) {
+        // Grey dot for excluded files
+        const dot = document.createElement('span');
+        dot.className = 'dot dot-grey';
+        row.appendChild(dot);
+      } else if (node.collisionLink) {
+        // Amber clickable dot for collision files
+        const adot = document.createElement('span');
+        adot.className = 'amber-indicator';
+        adot.title = 'Name conflict — click to see issue';
+        adot.addEventListener('click', e => { e.stopPropagation(); scrollToCard('collision'); });
+        row.appendChild(adot);
+      } else if (node.dot === 'green') {
+        const dot = document.createElement('span');
+        dot.className = 'dot dot-green';
+        row.appendChild(dot);
+      } else if (node.dot === 'orange') {
+        const dot = document.createElement('span');
+        dot.className = 'dot dot-orange';
+        row.appendChild(dot);
+      } else if (node.dot === 'grey') {
+        const dot = document.createElement('span');
+        dot.className = 'dot dot-grey';
+        row.appendChild(dot);
+      }
+    }
+
+    // Tooltip
+    if (node.tip && !excl) {
+      let tipText = node.tip;
+      // Winner tooltip: add "Selected from N identical copies"
+      if (node.winnerCount && node.winnerCount > 1) {
+        tipText = tipText + ' \u00B7 Selected from ' + node.winnerCount + ' identical copies';
+      }
+      row.addEventListener('mouseenter', e => showTip(e, tipText));
+      row.addEventListener('mouseleave', hideTip);
+      row.addEventListener('mousemove', moveTip);
+    }
+
+    // Context menu
+    row.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showCtx(e, node.id, node.type === 'folder', excl);
+    });
+
+    container.appendChild(row);
+
+    if (node.type === 'folder' && node.children && openNodes.has(node.id)) {
+      renderTree(node.children, container, depth + 1, excl, cascadeMap);
+    }
+  });
+}
+
+function renderAll() {
+  leftCascade = computeCascade(leftTree);
+  rightCascade = computeCascade(rightTree);
+
+  document.getElementById('left-panel').innerHTML = '';
+  document.getElementById('right-panel').innerHTML = '';
+  renderTree(leftTree, document.getElementById('left-panel'), 0, false, leftCascade);
+  renderTree(rightTree, document.getElementById('right-panel'), 0, false, rightCascade);
+}
+
+function toggle(id) {
+  if (openNodes.has(id)) openNodes.delete(id);
+  else openNodes.add(id);
+  renderAll();
+}
+
+// ─── Find node ────────────────────────────────────────────────────────────────
+function findNode(nodes, id) {
+  for (const n of nodes) {
+    if (n.id === id) return n;
+    if (n.children) { const f = findNode(n.children, id); if (f) return f; }
+  }
+  return null;
+}
+
+function setExcludedRec(node, val) {
+  if (val) excludedIds.add(node.id);
+  else excludedIds.delete(node.id);
+  if (node.children) node.children.forEach(c => setExcludedRec(c, val));
+}
+
+// ─── Cross-panel exclude sync ─────────────────────────────────────────────────
+// When a node is excluded/included, we also sync matching nodes in the other tree
+// by walking and matching on node label within the same parent path context.
+// For this prototype we use a simpler approach: match by label across all nodes.
+function syncExcludeByLabel(label, val, sourceTree, targetTree) {
+  function walkSync(nodes) {
+    nodes.forEach(n => {
+      if (n.label === label) setExcludedRec(n, val);
+      if (n.children) walkSync(n.children);
+    });
+  }
+  walkSync(targetTree);
+}
+
+// ─── Scroll helpers ───────────────────────────────────────────────────────────
+function scrollToCard(cardId) {
+  const card = document.getElementById('card-' + cardId);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  card.classList.remove('card-flash');
+  void card.offsetWidth;
+  card.classList.add('card-flash');
+  card.addEventListener('animationend', () => card.classList.remove('card-flash'), { once: true });
+}
+
+function scrollToTreeRow(rowId, panel) {
+  const allTrees = panel === 'left' ? leftTree : (panel === 'right' ? rightTree : [...leftTree, ...rightTree]);
+  ensureVisible(allTrees, rowId);
+  renderAll();
+
+  requestAnimationFrame(() => {
+    const row = document.getElementById('row-' + rowId);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    row.classList.remove('highlight-flash');
+    void row.offsetWidth;
+    row.classList.add('highlight-flash');
+    row.addEventListener('animationend', () => row.classList.remove('highlight-flash'), { once: true });
+  });
+}
+
+function ensureVisible(nodes, targetId, ancestors) {
+  if (!ancestors) ancestors = [];
+  for (const n of nodes) {
+    const path = [...ancestors, n.id];
+    if (n.id === targetId) {
+      ancestors.forEach(aid => openNodes.add(aid));
+      return true;
+    }
+    if (n.children) {
+      if (ensureVisible(n.children, targetId, path)) return true;
+    }
+  }
+  return false;
+}
+
+// ─── "Show in tree" actions ───────────────────────────────────────────────────
+function showSimilarityInTree() {
+  scrollToTreeRow('s1-pics', 'left');
+  setTimeout(() => {
+    scrollToTreeRow('s2-pics', 'left');
+    setTimeout(() => scrollToTreeRow('r-pics', 'right'), 400);
+  }, 500);
+}
+
+function showCollisionInTree() {
+  scrollToTreeRow('s1-docs-l-f1', 'left');
+  setTimeout(() => {
+    scrollToTreeRow('s2-docs-l-f1', 'left');
+    setTimeout(() => scrollToTreeRow('r-dl-f1', 'right'), 400);
+  }, 500);
+}
+
+// ─── Context menu ─────────────────────────────────────────────────────────────
+function showCtx(e, id, isFolder, excl) {
+  ctxNodeId = id;
+  ctxIsFolder = isFolder;
+  ctxCurrentlyExcluded = excl;
+
+  const label = document.getElementById('ctx-action-label');
+  if (excl) {
+    label.textContent = isFolder ? '\u2611  Include this folder' : '\u2611  Include this file';
+  } else {
+    label.textContent = isFolder ? '\u2298  Exclude this folder' : '\u2298  Exclude this file';
+  }
+
+  const menu = document.getElementById('ctx-menu');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.add('visible');
+}
+
+function doContextAction() {
+  if (!ctxNodeId) return;
+  // Find node in either tree
+  const nodeInLeft = findNode(leftTree, ctxNodeId);
+  const nodeInRight = findNode(rightTree, ctxNodeId);
+  const node = nodeInLeft || nodeInRight;
+  if (!node) { hideCtxMenu(); return; }
+
+  const newVal = !ctxCurrentlyExcluded;
+  setExcludedRec(node, newVal);
+
+  // Cross-panel sync: exclude/include the same-labelled node in the other tree
+  const otherTree = nodeInLeft ? rightTree : leftTree;
+  syncExcludeByLabel(node.label, newVal, null, otherTree);
+
+  hideCtxMenu();
+  renderAll();
+}
+
+function hideCtxMenu() {
+  document.getElementById('ctx-menu').classList.remove('visible');
+  ctxNodeId = null;
+}
+
+document.addEventListener('click', hideCtxMenu);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+
+// ─── Tooltip ──────────────────────────────────────────────────────────────────
+function showTip(e, text) {
+  const t = document.getElementById('tooltip');
+  t.textContent = text;
+  t.classList.add('visible');
+  moveTip(e);
+}
+function moveTip(e) {
+  const t = document.getElementById('tooltip');
+  t.style.left = (e.clientX + 14) + 'px';
+  t.style.top = (e.clientY - 30) + 'px';
+}
+function hideTip() { document.getElementById('tooltip').classList.remove('visible'); }
+
+// ─── Issue cards ──────────────────────────────────────────────────────────────
+function toggleCard(id) {
+  const card = document.getElementById('card-' + id);
+  const btn = document.getElementById('btn-' + id);
+  if (dismissedCards.has(id)) {
+    dismissedCards.delete(id);
+    card.classList.remove('dismissed');
+    btn.className = 'btn-dismiss';
+    btn.textContent = 'Dismiss';
+  } else {
+    dismissedCards.add(id);
+    card.classList.add('dismissed');
+    btn.className = 'btn-reopen';
+    btn.textContent = 'Reopen';
+  }
+  updateIssues();
+}
+
+function updateIssues() {
+  const total = 2;
+  const n = dismissedCards.size;
+  document.getElementById('issues-counter').textContent = n + ' / ' + total + ' dismissed';
+
+  if (n === total) {
+    document.getElementById('issues-title').textContent = 'All issues dismissed \u2014 ready to build';
+    document.getElementById('btn-build').disabled = false;
+    document.getElementById('bottom-status').innerHTML = 'Ready \u2014 <span>' + total + ' issues resolved</span>';
+  } else {
+    const rem = total - n;
+    document.getElementById('issues-title').textContent = total + ' issues \u2014 dismiss all to enable Build';
+    document.getElementById('btn-build').disabled = true;
+    document.getElementById('bottom-status').innerHTML = 'Resolve <span>' + rem + ' issue' + (rem > 1 ? 's' : '') + '</span> to proceed';
+  }
+}
+
+// ─── Init ──────────────────────────────────────────────────────────────────────
+renderAll();
+</script>
+</body>
+</html>

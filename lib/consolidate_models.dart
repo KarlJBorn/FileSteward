@@ -207,6 +207,194 @@ class ConsolidateAccumulateComplete extends ConsolidateEvent {
       );
 }
 
+// ---------------------------------------------------------------------------
+// v3 event types (two-scan model)
+// ---------------------------------------------------------------------------
+
+class FolderGroup {
+  final String relativePath;
+  final List<int> sourceIndices;
+  final int fileCount;
+  final int totalSizeBytes;
+
+  FolderGroup({
+    required this.relativePath,
+    required this.sourceIndices,
+    required this.fileCount,
+    required this.totalSizeBytes,
+  });
+
+  factory FolderGroup.fromJson(Map<String, dynamic> json) => FolderGroup(
+        relativePath: json['relative_path'] as String,
+        sourceIndices: (json['source_indices'] as List<dynamic>).cast<int>(),
+        fileCount: (json['file_count'] as num).toInt(),
+        totalSizeBytes: (json['total_size_bytes'] as num).toInt(),
+      );
+}
+
+class FileTypeCount {
+  final String extension;
+  final int count;
+
+  FileTypeCount({required this.extension, required this.count});
+
+  factory FileTypeCount.fromJson(Map<String, dynamic> json) => FileTypeCount(
+        extension: json['extension'] as String,
+        count: (json['count'] as num).toInt(),
+      );
+}
+
+class StructureScanComplete extends ConsolidateEvent {
+  final List<String> sourceFolders;
+  final List<FolderGroup> folderGroups;
+  final List<FileTypeCount> fileTypeCounts;
+  final int totalFiles;
+
+  StructureScanComplete({
+    required this.sourceFolders,
+    required this.folderGroups,
+    required this.fileTypeCounts,
+    required this.totalFiles,
+  });
+
+  factory StructureScanComplete.fromJson(Map<String, dynamic> json) =>
+      StructureScanComplete(
+        sourceFolders: (json['source_folders'] as List<dynamic>).cast<String>(),
+        folderGroups: (json['folder_groups'] as List<dynamic>)
+            .map((e) => FolderGroup.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        fileTypeCounts: (json['file_type_counts'] as List<dynamic>)
+            .map((e) => FileTypeCount.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        totalFiles: (json['total_files'] as num).toInt(),
+      );
+}
+
+class RoutedFile {
+  final String sourceFolder;
+  final String sourceRelativePath;
+  final String targetRelativePath;
+  final String hash;
+  final int sizeBytes;
+  /// "copy" | "skip_duplicate" | "copy_renamed"
+  final String action;
+  final String? originalTargetPath;
+  final String? duplicateOf;
+
+  RoutedFile({
+    required this.sourceFolder,
+    required this.sourceRelativePath,
+    required this.targetRelativePath,
+    required this.hash,
+    required this.sizeBytes,
+    required this.action,
+    this.originalTargetPath,
+    this.duplicateOf,
+  });
+
+  factory RoutedFile.fromJson(Map<String, dynamic> json) => RoutedFile(
+        sourceFolder: json['source_folder'] as String,
+        sourceRelativePath: json['source_relative_path'] as String,
+        targetRelativePath: json['target_relative_path'] as String,
+        hash: json['hash'] as String,
+        sizeBytes: (json['size_bytes'] as num).toInt(),
+        action: json['action'] as String,
+        originalTargetPath: json['original_target_path'] as String?,
+        duplicateOf: json['duplicate_of'] as String?,
+      );
+}
+
+class CollisionEntry {
+  final String sourceFolder;
+  final String sourceRelativePath;
+  final String hash;
+  final String renamedTo;
+
+  CollisionEntry({
+    required this.sourceFolder,
+    required this.sourceRelativePath,
+    required this.hash,
+    required this.renamedTo,
+  });
+
+  factory CollisionEntry.fromJson(Map<String, dynamic> json) => CollisionEntry(
+        sourceFolder: json['source_folder'] as String,
+        sourceRelativePath: json['source_relative_path'] as String,
+        hash: json['hash'] as String,
+        renamedTo: json['renamed_to'] as String,
+      );
+}
+
+class FilenameCollision {
+  final String targetRelativePath;
+  final List<CollisionEntry> entries;
+
+  FilenameCollision({required this.targetRelativePath, required this.entries});
+
+  factory FilenameCollision.fromJson(Map<String, dynamic> json) =>
+      FilenameCollision(
+        targetRelativePath: json['target_relative_path'] as String,
+        entries: (json['entries'] as List<dynamic>)
+            .map((e) => CollisionEntry.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
+class ContentScanAmbiguity {
+  final String ambiguityType;
+  final String description;
+  final List<String> files;
+
+  ContentScanAmbiguity({
+    required this.ambiguityType,
+    required this.description,
+    required this.files,
+  });
+
+  factory ContentScanAmbiguity.fromJson(Map<String, dynamic> json) =>
+      ContentScanAmbiguity(
+        ambiguityType: json['ambiguity_type'] as String,
+        description: json['description'] as String,
+        files: (json['files'] as List<dynamic>).cast<String>(),
+      );
+}
+
+class ContentScanComplete extends ConsolidateEvent {
+  final int filesToCopy;
+  final int duplicatesSkipped;
+  final int totalOutputSizeBytes;
+  final List<FilenameCollision> collisions;
+  final List<ContentScanAmbiguity> ambiguities;
+  final List<RoutedFile> routing;
+
+  ContentScanComplete({
+    required this.filesToCopy,
+    required this.duplicatesSkipped,
+    required this.totalOutputSizeBytes,
+    required this.collisions,
+    required this.ambiguities,
+    required this.routing,
+  });
+
+  factory ContentScanComplete.fromJson(Map<String, dynamic> json) =>
+      ContentScanComplete(
+        filesToCopy: (json['files_to_copy'] as num).toInt(),
+        duplicatesSkipped: (json['duplicates_skipped'] as num).toInt(),
+        totalOutputSizeBytes:
+            (json['total_output_size_bytes'] as num).toInt(),
+        collisions: (json['collisions'] as List<dynamic>)
+            .map((e) => FilenameCollision.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        ambiguities: (json['ambiguities'] as List<dynamic>)
+            .map((e) =>
+                ContentScanAmbiguity.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        routing: (json['routing'] as List<dynamic>)
+            .map((e) => RoutedFile.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 ConsolidateEvent? parseConsolidateEvent(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   return switch (type) {
@@ -223,6 +411,10 @@ ConsolidateEvent? parseConsolidateEvent(Map<String, dynamic> json) {
       ConsolidateFoldScanComplete.fromJson(json),
     'consolidate_accumulate_complete' =>
       ConsolidateAccumulateComplete.fromJson(json),
+    'consolidate_structure_scan_complete' =>
+      StructureScanComplete.fromJson(json),
+    'consolidate_content_scan_complete' =>
+      ContentScanComplete.fromJson(json),
     _ => null,
   };
 }
@@ -252,5 +444,28 @@ class V2FolderBuildCmd {
   Map<String, dynamic> toJson() => {
         'folder': folder,
         'relative_paths': relativePaths,
+      };
+}
+
+// ---------------------------------------------------------------------------
+// v3 commands
+// ---------------------------------------------------------------------------
+
+/// A single routing instruction for the v3 build step.
+class V3RoutedFileCmd {
+  final String sourceFolder;
+  final String sourceRelativePath;
+  final String targetRelativePath;
+
+  V3RoutedFileCmd({
+    required this.sourceFolder,
+    required this.sourceRelativePath,
+    required this.targetRelativePath,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'source_folder': sourceFolder,
+        'source_relative_path': sourceRelativePath,
+        'target_relative_path': targetRelativePath,
       };
 }

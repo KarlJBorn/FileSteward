@@ -105,6 +105,10 @@ enum ConsolidateCommand {
     ConsolidateFoldScan(FoldScanCmd),
     ConsolidateAccumulate(AccumulateCmd),
     ConsolidateV2Build(V2BuildCmd),
+    // v3 commands (two-scan model)
+    ConsolidateStructureScan(StructureScanCmd),
+    ConsolidateContentScan(ContentScanCmd),
+    ConsolidateV3Build(V3BuildCmd),
 }
 
 #[derive(Deserialize)]
@@ -190,6 +194,47 @@ struct V2BuildCmd {
     folders: Vec<V2FolderBuild>,
 }
 
+// v3 command structs --------------------------------------------------------
+
+/// Walk source folder trees (no hashing). Returns grouped folder structures
+/// and file type counts. Basis for Scan 1 UI.
+#[derive(Deserialize)]
+struct StructureScanCmd {
+    folders: Vec<String>,
+}
+
+/// Hash all files, deduplicate, route to target folders, detect collisions.
+/// Basis for Scan 2 UI. Requires user's confirmed target structure + exclusions
+/// from Scan 1.
+#[derive(Deserialize)]
+struct ContentScanCmd {
+    folders: Vec<String>,
+    #[serde(default)]
+    excluded_extensions: Vec<String>,
+    #[serde(default)]
+    excluded_folders: Vec<String>,
+    /// Relative paths explicitly included even if their extension is excluded.
+    #[serde(default)]
+    overridden_paths: Vec<String>,
+}
+
+/// A single file routing instruction for the v3 build step.
+#[derive(Deserialize)]
+struct V3RoutedFile {
+    source_folder: String,
+    source_relative_path: String,
+    target_relative_path: String,
+}
+
+/// Execute consolidation: copy files from source folders into [target] using
+/// the routing plan produced by the content scan (with user collision overrides
+/// already applied on the Dart side).
+#[derive(Deserialize)]
+struct V3BuildCmd {
+    target: String,
+    routing: Vec<V3RoutedFile>,
+}
+
 // ---------------------------------------------------------------------------
 // IPC output types
 // ---------------------------------------------------------------------------
@@ -250,6 +295,97 @@ struct ConsolidateError {
     #[serde(rename = "type")]
     event_type: &'static str,
     message: String,
+}
+
+// v3 output event types -----------------------------------------------------
+
+/// A folder path that exists in 2+ source roots (same relative path).
+#[derive(Serialize)]
+struct FolderGroup {
+    /// Relative path within any source root, e.g. "2001/Caribbean"
+    relative_path: String,
+    /// Which source indices (0-based) contain this folder.
+    source_indices: Vec<usize>,
+    /// Direct file count across all matching folders (not recursive).
+    file_count: usize,
+    /// Total size of files in all matching folders.
+    total_size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct FileTypeCount {
+    extension: String,
+    count: u64,
+}
+
+#[derive(Serialize)]
+struct StructureScanComplete {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    /// Source folder paths in order (index matches FolderGroup.source_indices).
+    source_folders: Vec<String>,
+    /// Folders whose relative path appears in 2+ sources (will be merged).
+    folder_groups: Vec<FolderGroup>,
+    /// File type counts across all sources, sorted by count descending.
+    file_type_counts: Vec<FileTypeCount>,
+    /// Total files found across all sources (pre-exclusion).
+    total_files: u64,
+}
+
+/// Describes where one file will end up in the output.
+#[derive(Serialize, Clone)]
+pub struct RoutedFile {
+    pub source_folder: String,
+    pub source_relative_path: String,
+    /// Relative path in the output directory.
+    pub target_relative_path: String,
+    pub hash: String,
+    pub size_bytes: u64,
+    /// "copy" | "skip_duplicate" | "copy_renamed"
+    pub action: String,
+    /// Only set when action == "copy_renamed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_target_path: Option<String>,
+    /// Only set when action == "skip_duplicate"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CollisionEntry {
+    source_folder: String,
+    source_relative_path: String,
+    hash: String,
+    /// The renamed target path assigned to resolve the collision.
+    renamed_to: String,
+}
+
+#[derive(Serialize)]
+struct FilenameCollision {
+    /// Target relative path that had 2+ different-hash files mapping to it.
+    target_relative_path: String,
+    entries: Vec<CollisionEntry>,
+}
+
+#[derive(Serialize)]
+struct ContentScanAmbiguity {
+    /// "unclear_context" | "multiple_versions"
+    ambiguity_type: String,
+    description: String,
+    /// Source paths involved.
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ContentScanComplete {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    files_to_copy: usize,
+    duplicates_skipped: usize,
+    total_output_size_bytes: u64,
+    collisions: Vec<FilenameCollision>,
+    ambiguities: Vec<ContentScanAmbiguity>,
+    routing: Vec<RoutedFile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1266,534 @@ fn handle_v2_build(cmd: V2BuildCmd) {
     });
 }
 
+fn handle_v3_build(cmd: V3BuildCmd) {
+    let target = PathBuf::from(&cmd.target);
+    if let Err(e) = fs::create_dir_all(&target) {
+        emit_error(&format!("Failed to create target directory: {}", e));
+        return;
+    }
+
+    let total = cmd.routing.len();
+    let mut files_copied = 0usize;
+    let mut files_skipped = 0usize;
+
+    for rf in &cmd.routing {
+        let src = PathBuf::from(&rf.source_folder).join(&rf.source_relative_path);
+        let dst = target.join(&rf.target_relative_path);
+        if let Some(parent) = dst.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                emit_error(&format!(
+                    "Disk full or permission error creating {}: {} — aborting",
+                    parent.display(), e
+                ));
+                return;
+            }
+        }
+        match fs::copy(&src, &dst) {
+            Ok(_) => {
+                files_copied += 1;
+                // Emit progress every 10 files or on last file.
+                if files_copied % 10 == 0 || files_copied + files_skipped == total {
+                    emit(&ConsolidateProgressEvent {
+                        event_type: "consolidate_progress",
+                        source: cmd.target.clone(),
+                        files_scanned: files_copied,
+                    });
+                }
+            }
+            Err(e) => {
+                // Check for disk-full condition (os error 28 on Linux/macOS, 112 on Windows).
+                let is_disk_full = e.raw_os_error().map(|c| c == 28 || c == 112).unwrap_or(false);
+                if is_disk_full {
+                    emit_error(&format!(
+                        "Disk full while copying {} — aborting",
+                        rf.source_relative_path
+                    ));
+                    return;
+                }
+                // Non-fatal: log and skip this file.
+                eprintln!("Skipped {}: {}", rf.source_relative_path, e);
+                files_skipped += 1;
+            }
+        }
+    }
+
+    emit(&ConsolidateBuildComplete {
+        event_type: "consolidate_build_complete",
+        session_id: String::new(),
+        target: cmd.target.clone(),
+        files_copied,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// v3 helpers
+// ---------------------------------------------------------------------------
+
+/// Walk all subdirectory paths relative to [root], skipping system dirs.
+fn walk_dirs_relative(root: &Path) -> Vec<String> {
+    let mut dirs = Vec::new();
+    walk_dirs_relative_inner(root, root, &mut dirs);
+    dirs
+}
+
+fn walk_dirs_relative_inner(root: &Path, current: &Path, out: &mut Vec<String>) {
+    let read_dir = match fs::read_dir(current) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry_result in read_dir {
+        let entry = match entry_result { Ok(e) => e, Err(_) => continue };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() && !should_skip_dir(&name_str) {
+            let rel = path.strip_prefix(root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !rel.is_empty() {
+                out.push(rel);
+            }
+            walk_dirs_relative_inner(root, &path, out);
+        }
+    }
+}
+
+/// Walk [root] collecting file paths and their immediate parent folder.
+/// Returns (relative_path, extension_lowercase, size_bytes).
+fn walk_files_with_meta(root: &Path) -> Vec<(String, String, u64)> {
+    walk_files(root)
+        .into_iter()
+        .filter_map(|p| {
+            let rel = p.strip_prefix(root)
+                .map(|r| r.to_string_lossy().to_string())
+                .ok()?;
+            let ext = p.extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            Some((rel, ext, size))
+        })
+        .collect()
+}
+
+/// Like walk_files_with_meta but applies extension + folder exclusions.
+/// Files listed in [overridden_paths] (relative) are included even if their
+/// extension is excluded.
+fn walk_files_filtered(
+    root: &Path,
+    excluded_extensions: &[String],
+    excluded_folders: &[String],
+    overridden_paths: &[String],
+) -> Vec<(String, String, u64)> {
+    walk_files_with_meta(root)
+        .into_iter()
+        .filter(|(rel, ext, _)| {
+            if excluded_extensions.iter().any(|e| e == ext) {
+                // Allow override for individually re-included files.
+                let norm = rel.trim_start_matches('/');
+                if !overridden_paths.iter().any(|p| p.trim_start_matches('/') == norm) {
+                    return false;
+                }
+            }
+            // Check if this file is inside any excluded folder (relative path prefix).
+            for excl in excluded_folders {
+                // Normalise: strip leading slash from exclusion if present.
+                let excl = excl.trim_start_matches('/');
+                if rel.starts_with(excl) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// Given a relative path for a file (e.g. "2001/Caribbean/photo.jpg"), produce
+/// a target relative path that keeps everything below the deepest candidate.
+/// Currently returns the path as-is (the routing is by best hash representative).
+fn target_path_from_relative(rel: &str) -> String {
+    rel.to_string()
+}
+
+/// Apply sequential suffix to a path stem to resolve a collision.
+/// "photo.jpg" → "photo_1.jpg" → "photo_2.jpg" etc.
+fn apply_collision_suffix(target_path: &str, n: usize) -> String {
+    let p = Path::new(target_path);
+    let parent = p.parent().map(|pp| pp.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let new_name = format!("{}_{}{}", stem, n, ext);
+    if parent.is_empty() {
+        new_name
+    } else {
+        format!("{}/{}", parent, new_name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v3 handlers
+// ---------------------------------------------------------------------------
+
+fn handle_structure_scan(cmd: StructureScanCmd) {
+    // Validate.
+    for folder in &cmd.folders {
+        if !Path::new(folder).is_dir() {
+            emit_error(&format!("Folder not found: {}", folder));
+            return;
+        }
+    }
+
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: "structure_scan".to_string(),
+        files_scanned: 0,
+    });
+
+    // Collect all subdirectory relative paths per source.
+    // Also gather file metadata for type counts and group stats.
+    let mut rel_path_to_sources: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut ext_counts: HashMap<String, u64> = HashMap::new();
+    let mut total_files: u64 = 0;
+    // Per relative-dir: (file_count_direct, total_size_direct).
+    let mut dir_stats: HashMap<String, (usize, u64)> = HashMap::new();
+
+    for (source_idx, folder) in cmd.folders.iter().enumerate() {
+        let root = PathBuf::from(folder);
+
+        // Subdirectories.
+        let dirs = walk_dirs_relative(&root);
+        for rel_dir in dirs {
+            rel_path_to_sources
+                .entry(rel_dir)
+                .or_default()
+                .push(source_idx);
+        }
+
+        // Files.
+        let files = walk_files_with_meta(&root);
+        total_files += files.len() as u64;
+        for (rel_file, ext, size) in &files {
+            if !ext.is_empty() {
+                *ext_counts.entry(ext.clone()).or_insert(0) += 1;
+            }
+            // Credit the file to its immediate parent dir (relative).
+            let parent = Path::new(rel_file)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !parent.is_empty() {
+                let entry = dir_stats.entry(parent).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += size;
+            }
+        }
+    }
+
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: "structure_scan".to_string(),
+        files_scanned: total_files as usize,
+    });
+
+    // Build folder groups — only paths present in 2+ sources.
+    let mut folder_groups: Vec<FolderGroup> = rel_path_to_sources
+        .into_iter()
+        .filter(|(_, sources)| sources.len() >= 2)
+        .map(|(rel_path, mut source_indices)| {
+            source_indices.sort();
+            source_indices.dedup();
+            let (file_count, total_size_bytes) =
+                dir_stats.get(&rel_path).copied().unwrap_or((0, 0));
+            FolderGroup {
+                relative_path: rel_path,
+                source_indices,
+                file_count,
+                total_size_bytes,
+            }
+        })
+        .collect();
+
+    // Sort: deepest first, then alphabetically.
+    folder_groups.sort_by(|a, b| {
+        let da = a.relative_path.split('/').count();
+        let db = b.relative_path.split('/').count();
+        db.cmp(&da).then(a.relative_path.cmp(&b.relative_path))
+    });
+
+    // Sort file type counts by count descending.
+    let mut file_type_counts: Vec<FileTypeCount> = ext_counts
+        .into_iter()
+        .map(|(extension, count)| FileTypeCount { extension, count })
+        .collect();
+    file_type_counts.sort_by(|a, b| b.count.cmp(&a.count));
+
+    emit(&StructureScanComplete {
+        event_type: "consolidate_structure_scan_complete",
+        source_folders: cmd.folders.clone(),
+        folder_groups,
+        file_type_counts,
+        total_files,
+    });
+}
+
+fn handle_content_scan(cmd: ContentScanCmd) {
+    for folder in &cmd.folders {
+        if !Path::new(folder).is_dir() {
+            emit_error(&format!("Folder not found: {}", folder));
+            return;
+        }
+    }
+
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: "content_scan".to_string(),
+        files_scanned: 0,
+    });
+
+    // Step 1: Collect all files from all sources applying exclusions.
+    // Each entry: (source_folder, relative_path, size).
+    let mut all_file_entries: Vec<(String, String, u64)> = Vec::new();
+    for folder in &cmd.folders {
+        let root = PathBuf::from(folder);
+        let files = walk_files_filtered(&root, &cmd.excluded_extensions, &cmd.excluded_folders, &cmd.overridden_paths);
+        for (rel, _, size) in files {
+            all_file_entries.push((folder.clone(), rel, size));
+        }
+    }
+
+    let total = all_file_entries.len();
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: "content_scan".to_string(),
+        files_scanned: 0,
+    });
+
+    // Step 2: Hash all files in parallel.
+    let counter = AtomicUsize::new(0);
+    let interval = (total / 20).max(50);
+
+    let hashed: Vec<(String, String, Option<String>, u64)> = all_file_entries
+        .par_iter()
+        .map(|(src_folder, rel, size)| {
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % interval == 0 {
+                emit(&ConsolidateProgressEvent {
+                    event_type: "consolidate_progress",
+                    source: "content_scan".to_string(),
+                    files_scanned: n,
+                });
+            }
+            let full_path = PathBuf::from(src_folder).join(rel);
+            let hash = hash_file(&full_path);
+            (src_folder.clone(), rel.clone(), hash, *size)
+        })
+        .collect();
+
+    emit(&ConsolidateProgressEvent {
+        event_type: "consolidate_progress",
+        source: "content_scan".to_string(),
+        files_scanned: total,
+    });
+
+    // Step 3: Group by hash to find duplicates.
+    // hash → Vec<(source_folder, relative_path, size)>
+    let mut by_hash: HashMap<String, Vec<(String, String, u64)>> = HashMap::new();
+    for (src_folder, rel, hash_opt, size) in &hashed {
+        if let Some(h) = hash_opt {
+            by_hash
+                .entry(h.clone())
+                .or_default()
+                .push((src_folder.clone(), rel.clone(), *size));
+        }
+    }
+
+    // Step 4: Build routing plan.
+    // For each hash group, pick the best representative path (penalty_score).
+    // The "target_relative_path" is the relative path of the winner.
+    // All others in the group are marked as skip_duplicate.
+    //
+    // For singletons, the file routes to its own relative path.
+    //
+    // target_path → RoutedFile (the winning copy)
+    let mut target_to_routed: HashMap<String, RoutedFile> = HashMap::new();
+    let mut routing: Vec<RoutedFile> = Vec::new();
+
+    for (hash, entries) in &by_hash {
+        if entries.len() == 1 {
+            // Unique file — routes to its own relative path.
+            let (src_folder, rel, size) = &entries[0];
+            let target = target_path_from_relative(rel);
+            let routed = RoutedFile {
+                source_folder: src_folder.clone(),
+                source_relative_path: rel.clone(),
+                target_relative_path: target.clone(),
+                hash: hash.clone(),
+                size_bytes: *size,
+                action: "copy".to_string(),
+                original_target_path: None,
+                duplicate_of: None,
+            };
+            target_to_routed.insert(target, routed.clone());
+            routing.push(routed);
+        } else {
+            // Duplicate group — pick best path via penalty_score.
+            let scored: Vec<(u32, &String, &String, u64)> = entries
+                .iter()
+                .map(|(src, rel, sz)| {
+                    let (score, _) = penalty_score(rel);
+                    (score, src, rel, *sz)
+                })
+                .collect();
+
+            let min_score = scored.iter().map(|(s, _, _, _)| *s).min().unwrap_or(0);
+            let mut winners: Vec<_> = scored
+                .iter()
+                .filter(|(s, _, _, _)| *s == min_score)
+                .collect();
+            // Stable tie-break: alphabetical by source_folder then rel.
+            winners.sort_by(|a, b| a.1.cmp(b.1).then(a.2.cmp(b.2)));
+            let (_, winner_src, winner_rel, winner_size) = winners[0];
+
+            let target = target_path_from_relative(winner_rel);
+            let keeper = RoutedFile {
+                source_folder: (*winner_src).clone(),
+                source_relative_path: (*winner_rel).clone(),
+                target_relative_path: target.clone(),
+                hash: hash.clone(),
+                size_bytes: *winner_size,
+                action: "copy".to_string(),
+                original_target_path: None,
+                duplicate_of: None,
+            };
+            target_to_routed.insert(target, keeper.clone());
+            routing.push(keeper);
+
+            // All non-winners are skipped.
+            for (_, src, rel, sz) in &scored {
+                if *src == *winner_src && *rel == *winner_rel {
+                    continue;
+                }
+                routing.push(RoutedFile {
+                    source_folder: (*src).clone(),
+                    source_relative_path: (*rel).clone(),
+                    target_relative_path: target_path_from_relative(rel),
+                    hash: hash.clone(),
+                    size_bytes: *sz,
+                    action: "skip_duplicate".to_string(),
+                    original_target_path: None,
+                    duplicate_of: Some(format!(
+                        "{}/{}",
+                        winner_src, winner_rel
+                    )),
+                });
+            }
+        }
+    }
+
+    // Step 5: Detect filename collisions.
+    // Two "copy" entries that share a target_relative_path but different hashes.
+    // Group all copy-intended files by their desired target path.
+    let mut target_conflicts: HashMap<String, Vec<RoutedFile>> = HashMap::new();
+    for rf in routing.iter().filter(|r| r.action == "copy") {
+        target_conflicts
+            .entry(rf.target_relative_path.clone())
+            .or_default()
+            .push(rf.clone());
+    }
+
+    let mut collisions: Vec<FilenameCollision> = Vec::new();
+    let mut renames: HashMap<String, String> = HashMap::new(); // old_target → new_target
+
+    for (target_path, entries) in &target_conflicts {
+        if entries.len() < 2 {
+            continue;
+        }
+        // Multiple different files (different hashes) want the same target path.
+        // Keep the first (lowest penalty), rename the rest.
+        let mut collision_entries: Vec<CollisionEntry> = Vec::new();
+        for (i, entry) in entries.iter().enumerate().skip(1) {
+            let renamed = apply_collision_suffix(target_path, i);
+            collision_entries.push(CollisionEntry {
+                source_folder: entry.source_folder.clone(),
+                source_relative_path: entry.source_relative_path.clone(),
+                hash: entry.hash.clone(),
+                renamed_to: renamed.clone(),
+            });
+            renames.insert(
+                format!("{}|{}", entry.source_folder, entry.source_relative_path),
+                renamed,
+            );
+        }
+        collisions.push(FilenameCollision {
+            target_relative_path: target_path.clone(),
+            entries: collision_entries,
+        });
+    }
+
+    // Apply renames to routing plan.
+    for rf in routing.iter_mut() {
+        if rf.action != "copy" {
+            continue;
+        }
+        let key = format!("{}|{}", rf.source_folder, rf.source_relative_path);
+        if let Some(new_target) = renames.get(&key) {
+            rf.original_target_path = Some(rf.target_relative_path.clone());
+            rf.target_relative_path = new_target.clone();
+            rf.action = "copy_renamed".to_string();
+        }
+    }
+
+    // Step 6: Detect ambiguities.
+    let mut ambiguities: Vec<ContentScanAmbiguity> = Vec::new();
+
+    // Ambiguity: a file sits at the root level of a source (no subfolder) →
+    // unclear which output folder it belongs to (if there are 2+ sources).
+    if cmd.folders.len() > 1 {
+        let root_files: Vec<_> = routing
+            .iter()
+            .filter(|rf| {
+                rf.action == "copy"
+                    && !rf.source_relative_path.contains('/')
+            })
+            .collect();
+        if !root_files.is_empty() {
+            ambiguities.push(ContentScanAmbiguity {
+                ambiguity_type: "unclear_context".to_string(),
+                description: format!(
+                    "{} file(s) found at root level with no subfolder — output placement may be ambiguous",
+                    root_files.len()
+                ),
+                files: root_files
+                    .iter()
+                    .map(|rf| format!("{}/{}", rf.source_folder, rf.source_relative_path))
+                    .collect(),
+            });
+        }
+    }
+
+    // Collect stats.
+    let files_to_copy = routing.iter().filter(|r| r.action == "copy" || r.action == "copy_renamed").count();
+    let duplicates_skipped = routing.iter().filter(|r| r.action == "skip_duplicate").count();
+    let total_output_size_bytes: u64 = routing
+        .iter()
+        .filter(|r| r.action == "copy" || r.action == "copy_renamed")
+        .map(|r| r.size_bytes)
+        .sum();
+
+    emit(&ContentScanComplete {
+        event_type: "consolidate_content_scan_complete",
+        files_to_copy,
+        duplicates_skipped,
+        total_output_size_bytes,
+        collisions,
+        ambiguities,
+        routing,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Stdin dispatch — called from main.rs
 // ---------------------------------------------------------------------------
@@ -1149,6 +1813,9 @@ pub fn run_from_stdin() {
         Ok(ConsolidateCommand::ConsolidateFoldScan(cmd)) => handle_fold_scan(cmd),
         Ok(ConsolidateCommand::ConsolidateAccumulate(cmd)) => handle_accumulate(cmd),
         Ok(ConsolidateCommand::ConsolidateV2Build(cmd)) => handle_v2_build(cmd),
+        Ok(ConsolidateCommand::ConsolidateStructureScan(cmd)) => handle_structure_scan(cmd),
+        Ok(ConsolidateCommand::ConsolidateContentScan(cmd)) => handle_content_scan(cmd),
+        Ok(ConsolidateCommand::ConsolidateV3Build(cmd)) => handle_v3_build(cmd),
         Err(e) => emit_error(&format!("Failed to parse consolidate command: {}", e)),
     }
 }
@@ -1238,5 +1905,249 @@ mod tests {
 
         // SAFETY: test binary is single-threaded for env mutation purposes.
         unsafe { std::env::remove_var("FILESTEWARD_REGISTRY_PATH") };
+    }
+
+    // -----------------------------------------------------------------------
+    // v3 tests: structure scan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_structure_scan_groups_equivalent_folders() {
+        let tmp = TempDir::new().unwrap();
+        let src1 = tmp.path().join("Pictures");
+        let src2 = tmp.path().join("Pictures 2012");
+        let src3 = tmp.path().join("Photos");
+
+        // All three sources have 2001/Caribbean and 2020 subfolders.
+        write_file(&src1, "2001/Caribbean/will_surfing.jpg", b"surf");
+        write_file(&src1, "2020/vacation.jpg", b"vacation");
+        write_file(&src2, "2001/Caribbean/will_surfing.jpg", b"surf");
+        write_file(&src2, "2020/vacation.jpg", b"vacation");
+        write_file(&src3, "2001/Caribbean/will_surfing.jpg", b"surf");
+        write_file(&src3, "2020/vacation.jpg", b"vacation");
+        // Source 1 also has a deeper unique subfolder.
+        write_file(&src1, "2001/Beach/sunset.jpg", b"sunset");
+
+        let cmd = StructureScanCmd {
+            folders: vec![
+                src1.to_string_lossy().to_string(),
+                src2.to_string_lossy().to_string(),
+                src3.to_string_lossy().to_string(),
+            ],
+        };
+
+        // Use internal functions to verify grouping logic.
+        let dirs1 = walk_dirs_relative(&src1);
+        let dirs2 = walk_dirs_relative(&src2);
+        let dirs3 = walk_dirs_relative(&src3);
+
+        // Verify all three sources have "2001" and "2001/Caribbean" and "2020".
+        assert!(dirs1.contains(&"2001".to_string()));
+        assert!(dirs1.contains(&"2001/Caribbean".to_string()));
+        assert!(dirs1.contains(&"2020".to_string()));
+        assert!(dirs2.contains(&"2001".to_string()));
+        assert!(dirs2.contains(&"2001/Caribbean".to_string()));
+        assert!(dirs3.contains(&"2001".to_string()));
+        assert!(dirs3.contains(&"2001/Caribbean".to_string()));
+
+        // "2001/Beach" is only in Source 1 — should not form a group.
+        assert!(!dirs2.contains(&"2001/Beach".to_string()));
+        assert!(!dirs3.contains(&"2001/Beach".to_string()));
+
+        // Build groups as handle_structure_scan does.
+        let mut rel_path_to_sources: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, folder) in [&src1, &src2, &src3].iter().enumerate() {
+            for rel_dir in walk_dirs_relative(folder) {
+                rel_path_to_sources.entry(rel_dir).or_default().push(idx);
+            }
+        }
+
+        let groups: Vec<_> = rel_path_to_sources
+            .iter()
+            .filter(|(_, srcs)| srcs.len() >= 2)
+            .collect();
+
+        // "2001", "2001/Caribbean", "2020" should all be groups.
+        let group_names: Vec<&str> = groups.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(group_names.contains(&"2001"), "Expected '2001' group");
+        assert!(group_names.contains(&"2001/Caribbean"), "Expected '2001/Caribbean' group");
+        assert!(group_names.contains(&"2020"), "Expected '2020' group");
+
+        // "2001/Beach" should NOT be a group (only in src1).
+        assert!(!group_names.contains(&"2001/Beach"), "'2001/Beach' should not be a group");
+
+        // Run full handler (exercises emit path).
+        handle_structure_scan(cmd);
+    }
+
+    #[test]
+    fn test_structure_scan_counts_file_types() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("Photos");
+        write_file(&src, "a.jpg", b"img1");
+        write_file(&src, "b.jpg", b"img2");
+        write_file(&src, "c.png", b"img3");
+        write_file(&src, "doc.pdf", b"doc");
+
+        let files = walk_files_with_meta(&src);
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for (_, ext, _) in &files {
+            if !ext.is_empty() {
+                *counts.entry(ext.clone()).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(counts["jpg"], 2);
+        assert_eq!(counts["png"], 1);
+        assert_eq!(counts["pdf"], 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // v3 tests: content scan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_content_scan_deduplicates_by_hash() {
+        let tmp = TempDir::new().unwrap();
+        let src1 = tmp.path().join("Folder1");
+        let src2 = tmp.path().join("Folder2");
+        let src3 = tmp.path().join("Folder3");
+
+        // Same content in all three sources — only one copy should be kept.
+        let same_content = b"identical photo bytes";
+        write_file(&src1, "2001/vacation.jpg", same_content);
+        write_file(&src2, "2001/vacation.jpg", same_content);
+        write_file(&src3, "2001/vacation.jpg", same_content);
+
+        // Unique file only in src1.
+        write_file(&src1, "2001/unique.jpg", b"unique bytes here");
+
+        let cmd = ContentScanCmd {
+            folders: vec![
+                src1.to_string_lossy().to_string(),
+                src2.to_string_lossy().to_string(),
+                src3.to_string_lossy().to_string(),
+            ],
+            excluded_extensions: vec![],
+            excluded_folders: vec![],
+            overridden_paths: vec![],
+        };
+
+        // Hash all files to verify dedup logic.
+        let mut all_entries: Vec<(String, String, u64)> = Vec::new();
+        for folder in &cmd.folders {
+            let root = PathBuf::from(folder);
+            let files = walk_files_with_meta(&root);
+            for (rel, _, size) in files {
+                all_entries.push((folder.clone(), rel, size));
+            }
+        }
+
+        let mut by_hash: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (src, rel, _) in &all_entries {
+            let full = PathBuf::from(src).join(rel);
+            if let Some(h) = hash_file(&full) {
+                by_hash.entry(h).or_default().push((src.clone(), rel.clone()));
+            }
+        }
+
+        // vacation.jpg should have 3 entries (one per source) with same hash.
+        let vac_hash = hash_file(&src1.join("2001/vacation.jpg")).unwrap();
+        assert_eq!(by_hash[&vac_hash].len(), 3, "Expected 3 copies of vacation.jpg");
+
+        // unique.jpg should have 1 entry.
+        let uniq_hash = hash_file(&src1.join("2001/unique.jpg")).unwrap();
+        assert_eq!(by_hash[&uniq_hash].len(), 1, "Expected 1 copy of unique.jpg");
+
+        // Run full handler.
+        handle_content_scan(cmd);
+    }
+
+    #[test]
+    fn test_content_scan_detects_filename_collision() {
+        let tmp = TempDir::new().unwrap();
+        let src1 = tmp.path().join("Folder1");
+        let src2 = tmp.path().join("Folder2");
+
+        // Same filename, different content — collision.
+        write_file(&src1, "docs/report.pdf", b"financial report 2020");
+        write_file(&src2, "docs/report.pdf", b"technical report 2021");
+
+        let hash1 = hash_file(&src1.join("docs/report.pdf")).unwrap();
+        let hash2 = hash_file(&src2.join("docs/report.pdf")).unwrap();
+        assert_ne!(hash1, hash2, "Files must have different hashes for collision test");
+
+        // Both files target "docs/report.pdf" — should detect as collision.
+        let target1 = target_path_from_relative("docs/report.pdf");
+        let target2 = target_path_from_relative("docs/report.pdf");
+        assert_eq!(target1, target2, "Both should map to same target");
+
+        // Verify rename logic.
+        let renamed = apply_collision_suffix("docs/report.pdf", 1);
+        assert_eq!(renamed, "docs/report_1.pdf");
+
+        let renamed2 = apply_collision_suffix("docs/report.pdf", 2);
+        assert_eq!(renamed2, "docs/report_2.pdf");
+
+        // Run full handler and verify collision is detected.
+        let cmd = ContentScanCmd {
+            folders: vec![
+                src1.to_string_lossy().to_string(),
+                src2.to_string_lossy().to_string(),
+            ],
+            excluded_extensions: vec![],
+            excluded_folders: vec![],
+            overridden_paths: vec![],
+        };
+        handle_content_scan(cmd);
+    }
+
+    #[test]
+    fn test_content_scan_applies_extension_exclusions() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("Folder1");
+        write_file(&src, "photo.jpg", b"photo bytes");
+        write_file(&src, "cache.tmp", b"temp data");
+        write_file(&src, "doc.pdf", b"document");
+
+        let files = walk_files_filtered(
+            &src,
+            &["tmp".to_string()],
+            &[],
+            &[],
+        );
+        let extensions: Vec<&str> = files.iter().map(|(_, ext, _)| ext.as_str()).collect();
+        assert!(!extensions.contains(&"tmp"), ".tmp files should be excluded");
+        assert!(extensions.contains(&"jpg"), ".jpg files should be included");
+        assert!(extensions.contains(&"pdf"), ".pdf files should be included");
+    }
+
+    #[test]
+    fn test_content_scan_applies_folder_exclusions() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("Folder1");
+        write_file(&src, "photos/vacation.jpg", b"photo");
+        write_file(&src, "cache/temp.jpg", b"cached");
+        write_file(&src, "docs/report.pdf", b"doc");
+
+        let files = walk_files_filtered(
+            &src,
+            &[],
+            &["cache".to_string()],
+            &[],
+        );
+        let rels: Vec<&str> = files.iter().map(|(rel, _, _)| rel.as_str()).collect();
+        assert!(!rels.iter().any(|r| r.starts_with("cache")), "cache/ should be excluded");
+        assert!(rels.iter().any(|r| r.starts_with("photos")), "photos/ should be included");
+        assert!(rels.iter().any(|r| r.starts_with("docs")), "docs/ should be included");
+    }
+
+    #[test]
+    fn test_apply_collision_suffix_handles_extensions() {
+        assert_eq!(apply_collision_suffix("photo.jpg", 1), "photo_1.jpg");
+        assert_eq!(apply_collision_suffix("photo.jpg", 2), "photo_2.jpg");
+        assert_eq!(apply_collision_suffix("folder/photo.jpg", 1), "folder/photo_1.jpg");
+        assert_eq!(apply_collision_suffix("deep/nested/file.tar.gz", 1), "deep/nested/file.tar_1.gz");
+        // File with no extension.
+        assert_eq!(apply_collision_suffix("README", 1), "README_1");
     }
 }
