@@ -61,6 +61,14 @@ moving fast without regressions or dropped scope.
 - **Write state to disk continuously.** Update CLAUDE.md and commit after every
   significant decision or discovery. Never hold important context only in conversation
   memory — context limits can hit at any time and anything not committed is lost.
+  When approaching a context limit, warn the Product Owner so we can wrap up cleanly
+  rather than getting cut off mid-task.
+
+- **Keep a running decisions log.** Each iteration section in this file has a
+  `Key Decisions` subsection. Whenever a non-obvious decision is made during a session
+  — why approach A over B, what was ruled out and why, constraints discovered mid-build
+  — add a bullet immediately and include it in the next natural commit. No separate
+  file, no extra process — just a few bullets that survive a context limit.
 
 - **Iteration close-out is a three-step interactive process** (each step requires
   explicit Product Owner input before proceeding to the next):
@@ -237,6 +245,17 @@ Deferred to follow-on (requires Rust engine work):
 See prototype: `prototype/screen3-review.html`
 
 Screen 4 (Build) remains deferred — scope not yet fully agreed.
+
+Key decisions:
+- `FILESTEWARD_RUST_BINARY` env var chosen over entitlements/Xcode fix for scan hang —
+  faster workaround, no Xcode changes; proper fix deferred to Iteration 12 (`make run`)
+- Dots moved to LEFT of file icon — user preference overrides original spec (right of name)
+- Screen 4 "Start Build" button removed from design — build starts on Screen 3 "Build"
+  click; Screen 4 = progress then result summary
+- Retrospective captured in closing PR description (not a separate doc)
+- Session prep committed as first commit on new iteration branch, seeds draft PR
+- Decisions log folded into CLAUDE.md iteration sections (not a separate file) to
+  minimise overhead
 
 ### Iteration 12 — Bug fixes + Screen 2/3 polish (next)
 **Goal:** Fix blocking scan bug, add `make run`, and address UI/engine issues from v0.6.7 review.
