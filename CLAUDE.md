@@ -58,6 +58,22 @@ moving fast without regressions or dropped scope.
   forward, it must be called out by name and either confirmed as intentionally dropped
   or added back to scope.
 
+- **Write state to disk continuously.** Update CLAUDE.md and commit after every
+  significant decision or discovery. Never hold important context only in conversation
+  memory — context limits can hit at any time and anything not committed is lost.
+
+- **Iteration close-out is a three-step interactive process** (each step requires
+  explicit Product Owner input before proceeding to the next):
+  1. **PR merged** — the iteration's PR must be reviewed, approved, AND merged to main
+     before close-out begins. CI must be green. Do not proceed to retrospective until
+     the merge is confirmed.
+  2. **Retrospective** — walk through what went well, what went badly, and process
+     improvements. Product Owner drives the observations; Claude captures them.
+     Agreed process changes are written to this document before proceeding.
+  3. **Next session prep** — produce the handoff prompt following the structure in
+     `memory/handoff_standard.md`. Product Owner reviews and confirms it before the
+     session ends. The handoff is the starting prompt for the next session.
+
 ## Commands
 
 ```bash
