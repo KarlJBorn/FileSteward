@@ -70,9 +70,11 @@ moving fast without regressions or dropped scope.
   2. **Retrospective** — walk through what went well, what went badly, and process
      improvements. Product Owner drives the observations; Claude captures them.
      Agreed process changes are written to this document before proceeding.
-  3. **Next session prep** — produce the handoff prompt following the structure in
-     `memory/handoff_standard.md`. Product Owner reviews and confirms it before the
-     session ends. The handoff is the starting prompt for the next session.
+  3. **Next session prep** — cut the new iteration branch, produce the handoff prompt
+     following the structure in `memory/handoff_standard.md`, and commit it to the new
+     branch as the first commit. Open a draft PR for the new iteration with the handoff
+     as its initial description. Product Owner reviews and confirms before the session
+     ends. The new PR is the starting point for the next session.
 
 ## Commands
 
